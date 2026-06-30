@@ -1,0 +1,19 @@
+.DS_Store
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 本地运行缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 测试数据
+test/test_data/
+
+# MLflow 与运行期产物
+mlruns/
+
+# 整个 task 存储目录都不进入版本库
+storage/
