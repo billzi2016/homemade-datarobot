@@ -16,541 +16,56 @@ task 运行入口。
 from __future__ import annotations
 
 import argparse
-import json
-import os
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict
 
 import mlflow
-import numpy as np
-import pandas as pd
-import yaml
-from sklearn.base import clone
-from sklearn.compose import ColumnTransformer
-from sklearn.decomposition import PCA
-from sklearn.impute import SimpleImputer
-from sklearn.linear_model import LogisticRegression
-from sklearn.manifold import TSNE
-from sklearn.metrics import (
-    accuracy_score,
-    classification_report,
-    f1_score,
-    mean_absolute_error,
-    mean_squared_error,
-    r2_score,
-    roc_auc_score,
+from analysis_runner import run_analysis
+from sklearn_runner import infer_feature_columns, run_sklearn
+from task_runtime import (
+    TaskPaths,
+    build_task_paths,
+    configure_runtime_env,
+    ensure_task_dirs,
+    load_or_create_run_state,
+    load_yaml,
+    mark_step_completed,
+    read_dataset,
+    save_run_state,
 )
-from sklearn.model_selection import train_test_split
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import LabelEncoder, OneHotEncoder, StandardScaler
+from torch_runner import run_torch
 
 
-@dataclass
-class TaskPaths:
-    """集中保存当前 task 会用到的路径，避免路径字符串散落在代码里。"""
-
-    task_dir: Path
-    config_path: Path
-    run_state_path: Path
-    checkpoints_dir: Path
-    artifacts_dir: Path
-    outputs_dir: Path
-    predictions_dir: Path
-    metrics_dir: Path
-    models_dir: Path
-    plots_dir: Path
-    analysis_dir: Path
-    mlruns_dir: Path
-    mpl_config_dir: Path
-    numba_cache_dir: Path
-
-
-def build_task_paths(task_dir: Path) -> TaskPaths:
-    """按照 PRD 里约定的目录结构，构造当前 task 运行所需的全部路径。"""
-
-    outputs_dir = task_dir / "outputs"
-    return TaskPaths(
-        task_dir=task_dir,
-        config_path=task_dir / "config.yaml",
-        run_state_path=task_dir / "run_state.json",
-        checkpoints_dir=task_dir / "checkpoints",
-        artifacts_dir=task_dir / "artifacts",
-        outputs_dir=outputs_dir,
-        predictions_dir=outputs_dir / "predictions",
-        metrics_dir=outputs_dir / "metrics",
-        models_dir=outputs_dir / "models",
-        plots_dir=outputs_dir / "plots",
-        analysis_dir=outputs_dir / "analysis",
-        mlruns_dir=task_dir / "mlruns",
-        mpl_config_dir=task_dir / ".mplconfig",
-        numba_cache_dir=task_dir / ".numba_cache",
-    )
-
-
-def ensure_task_dirs(paths: TaskPaths) -> None:
-    """确保 task 目录下的核心输出路径存在。"""
-
-    for path in [
-        paths.checkpoints_dir,
-        paths.artifacts_dir,
-        paths.predictions_dir,
-        paths.metrics_dir,
-        paths.models_dir,
-        paths.plots_dir,
-        paths.analysis_dir,
-        paths.mlruns_dir,
-        paths.mpl_config_dir,
-        paths.numba_cache_dir,
-    ]:
-        path.mkdir(parents=True, exist_ok=True)
-
-
-def configure_runtime_env(paths: TaskPaths) -> None:
-    """
-    配置运行时环境变量。
-
-    这里主要解决两个现实问题：
-    1. matplotlib 在当前机器上默认缓存目录不可写。
-    2. umap/numba 在当前机器上默认缓存目录也可能不可写。
-    """
-
-    os.environ["MPLCONFIGDIR"] = str(paths.mpl_config_dir)
-    os.environ["NUMBA_CACHE_DIR"] = str(paths.numba_cache_dir)
-
-
-def load_yaml(path: Path) -> Dict[str, Any]:
-    """读取单个 task 的配置文件。"""
-
-    with path.open("r", encoding="utf-8") as fh:
-        return yaml.safe_load(fh)
-
-
-def init_run_state(task_id: str) -> Dict[str, Any]:
-    """初始化 run_state.json 的内存结构。"""
-
-    return {
-        "task_id": task_id,
-        "status": "created",
-        "current_stage": "created",
-        "last_completed_experiment": None,
-        "completed_experiments": {
-            "analysis": [],
-            "sklearn": [],
-            "torch": [],
-        },
-        "completed_steps": [],
-        "pending_steps": [],
-        "resume_supported": True,
-        "resume_count": 0,
-        "updated_at": pd.Timestamp.utcnow().isoformat(),
-        "main_run_id": None,
-    }
-
-
-def load_or_create_run_state(paths: TaskPaths, task_id: str) -> Dict[str, Any]:
-    """如果已有 run_state.json 就读取，否则创建新的状态结构。"""
-
-    if paths.run_state_path.exists():
-        with paths.run_state_path.open("r", encoding="utf-8") as fh:
-            return json.load(fh)
-    return init_run_state(task_id)
-
-
-def save_run_state(paths: TaskPaths, state: Dict[str, Any]) -> None:
-    """把当前 task 的状态落到 run_state.json。"""
-
-    state["updated_at"] = pd.Timestamp.utcnow().isoformat()
-    with paths.run_state_path.open("w", encoding="utf-8") as fh:
-        json.dump(state, fh, ensure_ascii=False, indent=2)
-
-
-def mark_step_completed(state: Dict[str, Any], step_name: str) -> None:
-    """记录一个已完成步骤，避免重复写入。"""
-
-    if step_name not in state["completed_steps"]:
-        state["completed_steps"].append(step_name)
-
-
-def mark_experiment_completed(
-    state: Dict[str, Any], domain: str, experiment_name: str
+def log_task_level_summary(
+    summary: Dict[str, Any],
+    summary_prefix: str,
+    task_id: str,
+    run_state_path: Path,
 ) -> None:
     """
-    记录一个已完成实验项。
+    把子模块结果汇总回主 run。
 
-    这里同时更新：
-    - last_completed_experiment
-    - completed_experiments 分组列表
-    - completed_steps
+    目的很明确：
+    - 主 run 页面不能再是空的
+    - 用户点开 task 时，至少能直接看到最佳模型和关键指标
     """
 
-    if experiment_name not in state["completed_experiments"][domain]:
-        state["completed_experiments"][domain].append(experiment_name)
-    state["last_completed_experiment"] = f"{domain}.{experiment_name}"
-    mark_step_completed(state, f"{domain}.{experiment_name}.completed")
-
-
-def is_experiment_completed(
-    state: Dict[str, Any], domain: str, experiment_name: str
-) -> bool:
-    """判断某个实验是否已在历史运行中完成，用于续跑跳过。"""
-
-    return experiment_name in state["completed_experiments"].get(domain, [])
-
-
-def read_dataset(config: Dict[str, Any]) -> pd.DataFrame:
-    """按配置读取 CSV 数据。当前首版先只支持 CSV。"""
-
-    data_cfg = config["data"]
-    input_path = Path(data_cfg["input_path"])
-    if input_path.suffix.lower() != ".csv":
-        raise ValueError("当前首版实现只支持 CSV 输入。")
-    return pd.read_csv(input_path)
-
-
-def infer_feature_columns(config: Dict[str, Any], df: pd.DataFrame) -> Tuple[List[str], List[str]]:
-    """
-    推断或读取特征列。
-
-    规则：
-    1. 如果配置里显式给了 numeric_columns / categorical_columns，就直接使用。
-    2. 否则基于 pandas dtype 做保守推断。
-    """
-
-    target = config["data"]["target_column"]
-    drop_columns = set(config["data"].get("drop_columns", []))
-    usable_columns = [col for col in df.columns if col != target and col not in drop_columns]
-    features_cfg = config.get("features", {})
-
-    numeric_columns = list(features_cfg.get("numeric_columns") or [])
-    categorical_columns = list(features_cfg.get("categorical_columns") or [])
-
-    if not numeric_columns and not categorical_columns:
-        inferred_numeric = df[usable_columns].select_dtypes(include=[np.number]).columns.tolist()
-        inferred_categorical = [col for col in usable_columns if col not in inferred_numeric]
-        numeric_columns = inferred_numeric
-        categorical_columns = inferred_categorical
-
-    return numeric_columns, categorical_columns
-
-
-def build_preprocessor(config: Dict[str, Any], numeric_columns: List[str], categorical_columns: List[str]) -> ColumnTransformer:
-    """构造 sklearn 预处理器。"""
-
-    preprocess_cfg = config.get("preprocess", {})
-    numeric_imputer = preprocess_cfg.get("numeric_imputer", "median")
-    categorical_imputer = preprocess_cfg.get("categorical_imputer", "most_frequent")
-    scaler_name = preprocess_cfg.get("scaler", "standard")
-
-    numeric_steps: List[Tuple[str, Any]] = [("imputer", SimpleImputer(strategy=numeric_imputer))]
-    if scaler_name == "standard":
-        numeric_steps.append(("scaler", StandardScaler()))
-
-    categorical_steps: List[Tuple[str, Any]] = [
-        ("imputer", SimpleImputer(strategy=categorical_imputer)),
-        ("onehot", OneHotEncoder(handle_unknown="ignore")),
-    ]
-
-    return ColumnTransformer(
-        transformers=[
-            ("num", Pipeline(numeric_steps), numeric_columns),
-            ("cat", Pipeline(categorical_steps), categorical_columns),
-        ],
-        remainder="drop",
-    )
-
-
-def classification_model_registry(random_seed: int) -> Dict[str, Any]:
-    """
-    首版分类模型注册表。
-
-    当前先保守支持三类：
-    - logistic_regression
-    - random_forest
-    - xgboost
-    """
-
-    from sklearn.ensemble import RandomForestClassifier
-    from xgboost import XGBClassifier
-
-    return {
-        "logistic_regression": LogisticRegression(max_iter=1000, random_state=random_seed),
-        "random_forest": RandomForestClassifier(
-            n_estimators=200, random_state=random_seed, n_jobs=1
-        ),
-        "xgboost": XGBClassifier(
-            n_estimators=200,
-            max_depth=4,
-            learning_rate=0.05,
-            subsample=0.9,
-            colsample_bytree=0.9,
-            random_state=random_seed,
-            eval_metric="mlogloss",
-            n_jobs=1,
-        ),
-    }
-
-
-def regression_model_registry(random_seed: int) -> Dict[str, Any]:
-    """首版回归模型注册表。"""
-
-    from sklearn.ensemble import RandomForestRegressor
-    from sklearn.linear_model import LinearRegression
-    from xgboost import XGBRegressor
-
-    return {
-        "linear_regression": LinearRegression(),
-        "random_forest": RandomForestRegressor(
-            n_estimators=200, random_state=random_seed, n_jobs=1
-        ),
-        "xgboost": XGBRegressor(
-            n_estimators=200,
-            max_depth=4,
-            learning_rate=0.05,
-            subsample=0.9,
-            colsample_bytree=0.9,
-            random_state=random_seed,
-            n_jobs=1,
-        ),
-    }
-
-
-def build_model_registry(task_type: str, random_seed: int) -> Dict[str, Any]:
-    """根据任务类型返回可用模型注册表。"""
-
-    if task_type == "classification":
-        return classification_model_registry(random_seed)
-    if task_type == "regression":
-        return regression_model_registry(random_seed)
-    raise ValueError(f"不支持的 task_type: {task_type}")
-
-
-def compute_metrics(task_type: str, y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.ndarray | None = None) -> Dict[str, float]:
-    """根据任务类型计算首版核心指标。"""
-
-    if task_type == "classification":
-        metrics = {
-            "accuracy": float(accuracy_score(y_true, y_pred)),
-            "f1_macro": float(f1_score(y_true, y_pred, average="macro")),
-        }
-        if y_prob is not None:
-            unique_classes = np.unique(y_true)
-            try:
-                if len(unique_classes) == 2:
-                    metrics["roc_auc"] = float(roc_auc_score(y_true, y_prob[:, 1]))
-                else:
-                    metrics["roc_auc_ovr"] = float(
-                        roc_auc_score(y_true, y_prob, multi_class="ovr")
-                    )
-            except Exception:
-                pass
-        return metrics
-
-    rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
-    return {
-        "rmse": rmse,
-        "mae": float(mean_absolute_error(y_true, y_pred)),
-        "r2": float(r2_score(y_true, y_pred)),
-    }
-
-
-def save_json(path: Path, payload: Dict[str, Any]) -> None:
-    """把字典以 JSON 形式落盘。"""
-
-    with path.open("w", encoding="utf-8") as fh:
-        json.dump(payload, fh, ensure_ascii=False, indent=2)
-
-
-def save_dataframe(path: Path, df: pd.DataFrame) -> None:
-    """统一保存 DataFrame。"""
-
-    df.to_csv(path, index=False)
-
-
-def run_analysis(
-    config: Dict[str, Any],
-    df: pd.DataFrame,
-    target_series: pd.Series,
-    feature_df: pd.DataFrame,
-    paths: TaskPaths,
-    state: Dict[str, Any],
-) -> None:
-    """
-    执行 analysis 类实验。
-
-    这里首版支持：
-    - PCA
-    - t-SNE
-    - UMAP（若环境可用）
-    """
-
-    analysis_cfg = config.get("analysis", {})
-    if not analysis_cfg.get("enabled", True):
+    if not summary:
         return
 
-    # analysis 需要数值化输入，因此这里保守地只对原始特征做 one-hot，再做标准化。
-    analysis_input = pd.get_dummies(feature_df, dummy_na=True)
-    analysis_input = analysis_input.fillna(analysis_input.median(numeric_only=True)).fillna(0.0)
-    analysis_input_values = StandardScaler().fit_transform(analysis_input)
+    best_model_name = summary["best_model_name"]
+    metric_name = summary["primary_metric_name"]
+    metric_value = summary["primary_metric_value"]
 
-    analysis_jobs: List[Tuple[str, bool]] = [
-        ("pca", analysis_cfg.get("pca", {}).get("enabled", True)),
-        ("tsne", analysis_cfg.get("tsne", {}).get("enabled", True)),
-        ("umap", analysis_cfg.get("umap", {}).get("enabled", True)),
-    ]
+    mlflow.log_param(f"{summary_prefix}_best_model", best_model_name)
+    mlflow.log_metric(f"{summary_prefix}_{metric_name}", metric_value)
 
-    for name, enabled in analysis_jobs:
-        if not enabled or is_experiment_completed(state, "analysis", name):
-            continue
+    summary_path = summary.get("summary_path")
+    if summary_path:
+        mlflow.log_artifact(str(summary_path), artifact_path="task_summary")
 
-        state["current_stage"] = f"analysis.{name}"
-        save_run_state(paths, state)
-
-        with mlflow.start_run(run_name=f"analysis.{name}", nested=True):
-            if name == "pca":
-                reducer = PCA(n_components=2, random_state=config["project"]["random_seed"])
-                coords = reducer.fit_transform(analysis_input_values)
-                mlflow.log_metric("explained_variance_sum", float(np.sum(reducer.explained_variance_ratio_)))
-            elif name == "tsne":
-                tsne_cfg = analysis_cfg.get("tsne", {})
-                reducer = TSNE(
-                    n_components=2,
-                    perplexity=tsne_cfg.get("perplexity", 30),
-                    init="pca",
-                    learning_rate="auto",
-                    random_state=config["project"]["random_seed"],
-                )
-                coords = reducer.fit_transform(analysis_input_values)
-            else:
-                try:
-                    import umap  # type: ignore
-                except Exception as exc:
-                    mlflow.log_param("skipped_reason", f"umap_unavailable: {exc}")
-                    continue
-                umap_cfg = analysis_cfg.get("umap", {})
-                reducer = umap.UMAP(
-                    n_components=2,
-                    n_neighbors=umap_cfg.get("n_neighbors", 15),
-                    min_dist=umap_cfg.get("min_dist", 0.1),
-                    random_state=config["project"]["random_seed"],
-                )
-                coords = reducer.fit_transform(analysis_input_values)
-
-            result_df = pd.DataFrame(
-                {
-                    "x": coords[:, 0],
-                    "y": coords[:, 1],
-                    "target": target_series.astype(str).values,
-                }
-            )
-            result_path = paths.analysis_dir / f"{name}_2d.csv"
-            save_dataframe(result_path, result_df)
-            mlflow.log_artifact(str(result_path), artifact_path="analysis")
-
-            mark_experiment_completed(state, "analysis", name)
-            save_run_state(paths, state)
-
-
-def split_data(
-    config: Dict[str, Any], df: pd.DataFrame, feature_columns: List[str], target_column: str
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
-    """按配置切分训练集与测试集。"""
-
-    task_type = config["data"]["task_type"]
-    stratify = df[target_column] if task_type == "classification" and config["data"].get("stratify", True) else None
-    return train_test_split(
-        df[feature_columns],
-        df[target_column],
-        test_size=config["data"].get("test_size", 0.2),
-        random_state=config["project"]["random_seed"],
-        stratify=stratify,
-    )
-
-
-def run_sklearn(
-    config: Dict[str, Any],
-    df: pd.DataFrame,
-    paths: TaskPaths,
-    state: Dict[str, Any],
-) -> None:
-    """执行 sklearn 主线实验。"""
-
-    task_type = config["data"]["task_type"]
-    target_column = config["data"]["target_column"]
-    random_seed = config["project"]["random_seed"]
-    numeric_columns, categorical_columns = infer_feature_columns(config, df)
-    feature_columns = numeric_columns + categorical_columns
-
-    if task_type == "classification":
-        label_encoder = LabelEncoder()
-        df = df.copy()
-        df[target_column] = label_encoder.fit_transform(df[target_column].astype(str))
-    else:
-        label_encoder = None
-
-    x_train, x_test, y_train, y_test = split_data(config, df, feature_columns, target_column)
-    preprocessor = build_preprocessor(config, numeric_columns, categorical_columns)
-    registry = build_model_registry(task_type, random_seed)
-
-    configured_models = config["models"]["sklearn"][task_type]
-    summary_rows: List[Dict[str, Any]] = []
-
-    for model_name in configured_models:
-        if model_name not in registry or is_experiment_completed(state, "sklearn", model_name):
-            continue
-
-        state["current_stage"] = f"sklearn.{model_name}"
-        save_run_state(paths, state)
-
-        pipeline = Pipeline(
-            steps=[
-                ("preprocessor", preprocessor),
-                ("model", clone(registry[model_name])),
-            ]
-        )
-
-        with mlflow.start_run(run_name=f"sklearn.{model_name}", nested=True):
-            pipeline.fit(x_train, y_train)
-            y_pred = pipeline.predict(x_test)
-            y_prob = pipeline.predict_proba(x_test) if hasattr(pipeline, "predict_proba") else None
-
-            metrics = compute_metrics(task_type, y_test.to_numpy(), y_pred, y_prob)
-            for metric_name, metric_value in metrics.items():
-                mlflow.log_metric(metric_name, metric_value)
-
-            prediction_df = x_test.copy()
-            prediction_df["y_true"] = y_test.values
-            prediction_df["y_pred"] = y_pred
-            prediction_path = paths.predictions_dir / f"{model_name}_predictions.csv"
-            save_dataframe(prediction_path, prediction_df)
-            mlflow.log_artifact(str(prediction_path), artifact_path="predictions")
-
-            metric_payload = {
-                "task_id": config["task"]["task_id"],
-                "model_name": model_name,
-                "task_type": task_type,
-                "metrics": metrics,
-            }
-            metrics_path = paths.metrics_dir / f"{model_name}_metrics.json"
-            save_json(metrics_path, metric_payload)
-            mlflow.log_artifact(str(metrics_path), artifact_path="metrics")
-
-            if task_type == "classification":
-                report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
-                report_path = paths.metrics_dir / f"{model_name}_classification_report.json"
-                save_json(report_path, report)
-                mlflow.log_artifact(str(report_path), artifact_path="metrics")
-
-            summary_rows.append({"model_name": model_name, **metrics})
-            mark_experiment_completed(state, "sklearn", model_name)
-            save_run_state(paths, state)
-
-    if summary_rows:
-        summary_df = pd.DataFrame(summary_rows).sort_values(
-            by=list(summary_rows[0].keys())[1], ascending=False
-        )
-        summary_path = paths.metrics_dir / "sklearn_summary.csv"
-        save_dataframe(summary_path, summary_df)
+    if run_state_path.exists():
+        mlflow.log_artifact(str(run_state_path), artifact_path="task_summary")
 
 
 def run_task(task_dir: Path) -> None:
@@ -589,7 +104,7 @@ def run_task(task_dir: Path) -> None:
         mlflow.set_tag("run_level", "task")
         mlflow.log_dict(config, "config_snapshot.yaml")
 
-        df = read_dataset(config)
+        df = read_dataset(paths, config)
         mark_step_completed(state, "data_loaded")
         save_run_state(paths, state)
 
@@ -602,12 +117,25 @@ def run_task(task_dir: Path) -> None:
         mark_step_completed(state, "schema_checked")
         save_run_state(paths, state)
 
-        run_analysis(config, df, target_series, feature_df, paths, state)
-        run_sklearn(config, df, paths, state)
+        run_analysis(config, target_series, feature_df, paths, state)
+        sklearn_summary = run_sklearn(config, df, paths, state)
+        torch_summary = run_torch(config, df, paths, state)
 
         state["status"] = "completed"
         state["current_stage"] = "completed"
         save_run_state(paths, state)
+        log_task_level_summary(
+            sklearn_summary,
+            summary_prefix="sklearn",
+            task_id=task_id,
+            run_state_path=paths.run_state_path,
+        )
+        log_task_level_summary(
+            torch_summary,
+            summary_prefix="torch",
+            task_id=task_id,
+            run_state_path=paths.run_state_path,
+        )
 
 
 def parse_args() -> argparse.Namespace:

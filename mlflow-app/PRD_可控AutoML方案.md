@@ -14,7 +14,7 @@
 
 需要特别强调的是：本 PRD 只描述 `MLflow` 以及它下面真正干活的所有实验模块，包括分析实验、降维实验、`sklearn` 实验、`torch` 实验，不再把 Django 业务层混在同一份文档里。
 
-本项目后续采用 `storage/task_000001` 这种目录作为最小任务管理单元。每个任务目录必须自带该任务自己的配置、数据、结果与 artifact，不能和其他任务混放。
+本项目后续采用 `storage/user_bizi/tasks/task_iris` 这种目录作为最小任务管理单元。每个任务目录必须自带该任务自己的配置、数据、结果与 artifact，不能和其他任务混放。
 
 ---
 
@@ -136,7 +136,7 @@
 
 ### 4.2 典型使用流程
 
-1. 用户通过 Django 创建一个新的任务单元，例如 `storage/task_000001`。
+1. 用户通过 Django 创建一个新的任务单元，例如 `storage/user_bizi/tasks/task_iris`。
 2. 用户通过 Django 上传数据，或直接将数据放入该实验目录下的 `data/`。
 3. 用户在该实验目录下的 `config.yaml` 中指定数据路径、目标列、任务类型、CV、模型清单等参数。
 4. 系统按配置自动执行：
@@ -160,26 +160,28 @@
 ```text
 homemade-datarobot/
 ├── storage/
-│   ├── task_000001/
-│   │   ├── config.yaml
-│   │   ├── data/
-│   │   │   ├── raw/
-│   │   │   ├── processed/
-│   │   │   └── splits/
-│   │   ├── outputs/
-│   │   │   ├── predictions/
-│   │   │   ├── metrics/
-│   │   │   └── models/
-│   │   ├── artifacts/
-│   │   ├── checkpoints/
-│   │   └── run_state.json
-│   └── task_000002/
-│       ├── config.yaml
-│       ├── data/
-│       ├── outputs/
-│       ├── artifacts/
-│       ├── checkpoints/
-│       └── run_state.json
+│   └── user_bizi/
+│       └── tasks/
+│           ├── task_iris/
+│           │   ├── config.yaml
+│           │   ├── data/
+│           │   │   ├── raw/
+│           │   │   ├── processed/
+│           │   │   └── splits/
+│           │   ├── outputs/
+│           │   │   ├── predictions/
+│           │   │   ├── metrics/
+│           │   │   └── models/
+│           │   ├── artifacts/
+│           │   ├── checkpoints/
+│           │   └── run_state.json
+│           └── task_titanic_dataset/
+│               ├── config.yaml
+│               ├── data/
+│               ├── outputs/
+│               ├── artifacts/
+│               ├── checkpoints/
+│               └── run_state.json
 └── mlflow-app/
     ├── sklearn/
     ├── torch/
@@ -190,25 +192,25 @@ homemade-datarobot/
 
 ### 5.1 顶层目录说明
 
-- `storage/task_000001/config.yaml`
+- `storage/user_bizi/tasks/task_iris/config.yaml`
   - 单个任务的主配置文件。
   - Django 与 MLflow 实验子系统共享。
   - 一个任务一份，不同任务之间不能混用。
 
-- `storage/task_000001/data/`
+- `storage/user_bizi/tasks/task_iris/data/`
   - 单个任务的数据目录。
   - 包括原始数据、训练集、验证集、测试集、处理后的数据、中间缓存数据等。
   - 数据必须和所属任务绑定。
 
-- `storage/task_000001/outputs/`
+- `storage/user_bizi/tasks/task_iris/outputs/`
   - 单个任务的输出目录。
   - 放预测结果、评估汇总、模型文件、图表等最终产物。
 
-- `storage/task_000001/run_state.json`
+- `storage/user_bizi/tasks/task_iris/run_state.json`
   - 单个任务的可读状态文件。
   - 用于记录当前状态、已完成步骤、已完成模型、待执行步骤、恢复信息。
 
-- `storage/task_000001/checkpoints/`
+- `storage/user_bizi/tasks/task_iris/checkpoints/`
   - 单个任务的保存点目录。
   - 用于中断恢复，尤其是 `torch` 训练恢复。
 
