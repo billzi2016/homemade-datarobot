@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Tuple
 import mlflow
 import matplotlib.pyplot as plt
 import numpy as np
+import optuna
 import pandas as pd
 from sklearn.base import clone
 from sklearn.compose import ColumnTransformer
@@ -201,6 +202,82 @@ def build_model_registry(task_type: str, random_seed: int) -> Dict[str, Any]:
     raise ValueError(f"不支持的 task_type: {task_type}")
 
 
+def build_xgboost_from_params(
+    task_type: str,
+    random_seed: int,
+    params: Dict[str, Any],
+):
+    """根据搜索结果构造 xgboost 模型。"""
+
+    if task_type == "classification":
+        from xgboost import XGBClassifier
+
+        return XGBClassifier(
+            random_state=random_seed,
+            eval_metric="mlogloss",
+            n_jobs=1,
+            **params,
+        )
+
+    from xgboost import XGBRegressor
+
+    return XGBRegressor(random_state=random_seed, n_jobs=1, **params)
+
+
+def tune_xgboost_with_optuna(
+    config: Dict[str, Any],
+    task_type: str,
+    random_seed: int,
+    preprocessor: ColumnTransformer,
+    x_train: pd.DataFrame,
+    y_train: pd.Series,
+    x_valid: pd.DataFrame,
+    y_valid: pd.Series,
+) -> Dict[str, Any]:
+    """
+    使用 Optuna 搜索 xgboost 参数。
+
+    当前只做一层务实实现：
+    - 不追求覆盖所有参数
+    - 优先搜索最影响效果的核心参数
+    """
+
+    n_trials = int(config.get("search", {}).get("n_trials", 12))
+
+    def objective(trial: optuna.Trial) -> float:
+        params = {
+            "n_estimators": trial.suggest_int("n_estimators", 80, 260),
+            "max_depth": trial.suggest_int("max_depth", 3, 8),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
+            "subsample": trial.suggest_float("subsample", 0.7, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.7, 1.0),
+            "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
+        }
+        model = build_xgboost_from_params(task_type, random_seed, params)
+        pipeline = Pipeline(
+            steps=[
+                ("preprocessor", preprocessor),
+                ("model", model),
+            ]
+        )
+        pipeline.fit(x_train, y_train)
+        y_pred = pipeline.predict(x_valid)
+
+        if task_type == "classification":
+            return float(accuracy_score(y_valid, y_pred))
+        rmse = float(np.sqrt(mean_squared_error(y_valid, y_pred)))
+        return -rmse
+
+    direction = "maximize" if task_type == "classification" else "maximize"
+    study = optuna.create_study(direction=direction)
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    return {
+        "best_params": study.best_params,
+        "best_value": float(study.best_value),
+        "n_trials": n_trials,
+    }
+
+
 def compute_metrics(
     task_type: str, y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.ndarray | None = None
 ) -> Dict[str, float]:
@@ -285,14 +362,46 @@ def run_sklearn(
         state["current_stage"] = f"sklearn.{model_name}"
         save_run_state(paths, state)
 
+        model_instance = clone(registry[model_name])
+        optuna_result: Dict[str, Any] = {}
+        use_optuna = (
+            config.get("search", {}).get("method") == "optuna"
+            and model_name == "xgboost"
+            and config.get("search", {}).get("sklearn", {}).get("xgboost", {}).get("enabled", False)
+        )
+
+        if use_optuna:
+            optuna_result = tune_xgboost_with_optuna(
+                config=config,
+                task_type=task_type,
+                random_seed=random_seed,
+                preprocessor=preprocessor,
+                x_train=x_train,
+                y_train=y_train,
+                x_valid=x_test,
+                y_valid=y_test,
+            )
+            model_instance = build_xgboost_from_params(
+                task_type=task_type,
+                random_seed=random_seed,
+                params=optuna_result["best_params"],
+            )
+
         pipeline = Pipeline(
             steps=[
                 ("preprocessor", preprocessor),
-                ("model", clone(registry[model_name])),
+                ("model", model_instance),
             ]
         )
 
         with mlflow.start_run(run_name=f"sklearn.{model_name}", nested=True):
+            if optuna_result:
+                mlflow.log_param("search_method", "optuna")
+                mlflow.log_param("optuna_n_trials", optuna_result["n_trials"])
+                for key, value in optuna_result["best_params"].items():
+                    mlflow.log_param(f"best_{key}", value)
+                mlflow.log_metric("optuna_best_value", optuna_result["best_value"])
+
             pipeline.fit(x_train, y_train)
             y_pred = pipeline.predict(x_test)
             y_prob = pipeline.predict_proba(x_test) if hasattr(pipeline, "predict_proba") else None

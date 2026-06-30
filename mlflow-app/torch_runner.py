@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Tuple
 import mlflow
 import matplotlib.pyplot as plt
 import numpy as np
+import optuna
 import pandas as pd
 import torch
 from torch import nn
@@ -222,6 +223,79 @@ def build_torch_model(
     raise ValueError(f"不支持的 torch 模型: {model_name}")
 
 
+def tune_mlp_with_optuna(
+    config: Dict[str, Any],
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_valid: np.ndarray,
+    y_valid: np.ndarray,
+    task_type: str,
+) -> Dict[str, Any]:
+    """使用 Optuna 搜索 MLP 的关键超参数。"""
+
+    n_trials = int(config.get("search", {}).get("n_trials", 12))
+    random_seed = int(config["project"]["random_seed"])
+    output_dim = len(np.unique(y_train)) if task_type == "classification" else 1
+
+    def objective(trial: optuna.Trial) -> float:
+        torch.manual_seed(random_seed)
+        hidden_dims = [
+            trial.suggest_int("hidden_dim_1", 32, 256, step=32),
+            trial.suggest_int("hidden_dim_2", 16, 128, step=16),
+        ]
+        dropout = trial.suggest_float("dropout", 0.0, 0.4)
+        learning_rate = trial.suggest_float("learning_rate", 1e-4, 5e-3, log=True)
+        batch_size = trial.suggest_categorical("batch_size", [16, 32, 64, 128])
+
+        model = TabularMLP(
+            input_dim=x_train.shape[1],
+            output_dim=output_dim,
+            hidden_dims=hidden_dims,
+            dropout=dropout,
+        )
+        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+
+        if task_type == "classification":
+            loss_fn = nn.CrossEntropyLoss()
+            y_train_tensor = torch.tensor(y_train, dtype=torch.long)
+            y_valid_tensor = torch.tensor(y_valid, dtype=torch.long)
+        else:
+            loss_fn = nn.MSELoss()
+            y_train_tensor = torch.tensor(y_train, dtype=torch.float32).view(-1, 1)
+            y_valid_tensor = torch.tensor(y_valid, dtype=torch.float32).view(-1, 1)
+
+        train_ds = TensorDataset(torch.tensor(x_train, dtype=torch.float32), y_train_tensor)
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+
+        model.train()
+        for _ in range(12):
+            for batch_x, batch_y in train_loader:
+                optimizer.zero_grad()
+                logits = model(batch_x)
+                loss = loss_fn(logits, batch_y)
+                loss.backward()
+                optimizer.step()
+
+        model.eval()
+        with torch.no_grad():
+            logits = model(torch.tensor(x_valid, dtype=torch.float32))
+            if task_type == "classification":
+                y_prob = torch.softmax(logits, dim=1).numpy()
+                y_pred = np.argmax(y_prob, axis=1)
+                return float(accuracy_score(y_valid, y_pred))
+
+            y_pred = logits.numpy().reshape(-1)
+            return -float(np.sqrt(mean_squared_error(y_valid, y_pred)))
+
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    return {
+        "best_params": study.best_params,
+        "best_value": float(study.best_value),
+        "n_trials": n_trials,
+    }
+
+
 def compute_torch_metrics(
     task_type: str, y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.ndarray | None = None
 ) -> Dict[str, float]:
@@ -401,11 +475,40 @@ def run_torch(
                 mlflow.log_param("skipped_reason", "tabnet_real_training_not_implemented_yet")
                 continue
 
+            training_cfg = dict(config.get("training", {}).get("torch", {}))
+            use_optuna = (
+                config.get("search", {}).get("method") == "optuna"
+                and model_name == "mlp"
+                and config.get("search", {}).get("torch", {}).get("mlp", {}).get("enabled", False)
+            )
+
+            if use_optuna:
+                optuna_result = tune_mlp_with_optuna(
+                    config=config,
+                    x_train=x_train,
+                    y_train=y_train,
+                    x_valid=x_test,
+                    y_valid=y_test,
+                    task_type=task_type,
+                )
+                training_cfg["hidden_dims"] = [
+                    optuna_result["best_params"]["hidden_dim_1"],
+                    optuna_result["best_params"]["hidden_dim_2"],
+                ]
+                training_cfg["dropout"] = optuna_result["best_params"]["dropout"]
+                training_cfg["learning_rate"] = optuna_result["best_params"]["learning_rate"]
+                training_cfg["batch_size"] = optuna_result["best_params"]["batch_size"]
+                mlflow.log_param("search_method", "optuna")
+                mlflow.log_param("optuna_n_trials", optuna_result["n_trials"])
+                for key, value in optuna_result["best_params"].items():
+                    mlflow.log_param(f"best_{key}", value)
+                mlflow.log_metric("optuna_best_value", optuna_result["best_value"])
+
             model = build_torch_model(
                 model_name,
                 input_dim=x_train.shape[1],
                 output_dim=output_dim,
-                training_cfg=config.get("training", {}).get("torch", {}),
+                training_cfg=training_cfg,
             )
             result = train_standard_torch_model(
                 model_name=model_name,
@@ -417,7 +520,7 @@ def run_torch(
                 task_type=task_type,
                 paths=paths,
                 state=state,
-                config=config,
+                config={**config, "training": {"torch": training_cfg}},
             )
 
             prediction_df = pd.DataFrame({"y_true": y_test, "y_pred": result["y_pred"]})
