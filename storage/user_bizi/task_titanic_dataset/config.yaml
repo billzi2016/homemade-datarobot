@@ -1,0 +1,108 @@
+project:
+  name: homemade_datarobot
+  random_seed: 42
+
+task:
+  task_id: task_titanic_dataset
+
+data:
+  input_path: data/raw/Titanic-Dataset.csv
+  file_type: csv
+  target_column: Survived
+  drop_columns:
+    - PassengerId
+    - Name
+    - Ticket
+    - Cabin
+  task_type: classification
+  test_size: 0.2
+  stratify: true
+
+features:
+  numeric_columns:
+    - Pclass
+    - Age
+    - SibSp
+    - Parch
+    - Fare
+  categorical_columns:
+    - Sex
+    - Embarked
+  onehot_columns:
+    - Sex
+    - Embarked
+
+preprocess:
+  numeric_imputer: median
+  categorical_imputer: most_frequent
+  scaler: standard
+  encoder: onehot
+
+analysis:
+  enabled: true
+  pca:
+    enabled: true
+  tsne:
+    enabled: true
+    perplexity: 30
+  umap:
+    enabled: true
+    n_neighbors: 15
+    min_dist: 0.1
+
+search:
+  method: auto
+  n_trials: 4
+  sklearn:
+    xgboost:
+      enabled: true
+  torch:
+    mlp:
+      enabled: true
+
+cv:
+  n_splits: 2
+
+imbalance:
+  enabled: true
+  strategy: auto
+
+models:
+  sklearn:
+    classification:
+      - logistic_regression
+      - svm
+      - random_forest
+      - extra_trees
+      - gradient_boosting
+      - hist_gradient_boosting
+      - decision_tree
+      - knn
+      - gaussian_nb
+      - bernoulli_nb
+      - multinomial_nb
+      - xgboost
+      - lightgbm
+    regression: []
+  torch:
+    classification:
+      - mlp
+      - cnn1d
+      - tabnet
+    regression: []
+
+training:
+  torch:
+    epochs: 30
+    batch_size: 64
+    learning_rate: 0.001
+    hidden_dims:
+      - 128
+      - 64
+    dropout: 0.2
+    early_stopping:
+      patience: 5
+
+mlflow:
+  tracking_uri: file:///Users/bizi/Desktop/GitHub/homemade-datarobot/storage/user_bizi/mlruns
+  experiment_name: task_titanic_dataset

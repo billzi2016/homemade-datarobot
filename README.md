@@ -27,8 +27,8 @@
   - `cnn1d`
   - `tabnet`
 - `MLflow`
-  - 一个 `task` 对应一个主 run
-  - 子实验使用 nested run
+  - 一个 `task` 对应一个 experiment
+  - experiment 下面直接展示具体分析项和模型 run
   - 每个 `task` 有自己的 `run_state.json`
 - `search`
   - `auto`
@@ -134,17 +134,23 @@ storage/user_bizi/mlruns/
 
 ## 已准备好的示例 task
 
-当前本地已经准备了两个示例 task：
+当前仓库保留了两个示例 task 配置：
 
 ### task_iris
 
 - 数据：`Iris.csv`
 - 类型：多分类
+- 放置路径：`storage/user_bizi/task_iris/data/raw/Iris.csv`
 
 ### task_titanic_dataset
 
 - 数据：`Titanic-Dataset.csv`
 - 类型：二分类
+- 放置路径：`storage/user_bizi/task_titanic_dataset/data/raw/Titanic-Dataset.csv`
+
+示例数据不直接放入版本库。下载方式与列名要求见：
+
+- [DATASET_README.md](/Users/bizi/Desktop/GitHub/homemade-datarobot/DATASET_README.md)
 
 ---
 
@@ -210,11 +216,15 @@ http://127.0.0.1:5001
 
 进入单个 experiment 后，会看到：
 
-- `analysis.pca / analysis.tsne / analysis.umap`
-- `sklearn.xxx`
-- `torch.xxx`
+- `pca / tsne / umap`
+- `logistic_regression / svm / random_forest / ... / xgboost / lightgbm`
+- `mlp / cnn1d / tabnet`
 
-这些具体模型和分析项以 nested run 方式挂在对应 task run 下。
+也就是说，当前 MLflow 展示结构已经改为：
+
+- 不再额外创建 `task -> task` 主 run 套娃
+- 不再在 UI 中按 `sklearn.xxx / torch.xxx` 加技术栈前缀
+- experiment 顶层直接展示具体分析项和模型项
 
 ---
 
@@ -268,9 +278,9 @@ search:
 
 - 单 task 配置读取
 - 单 task `run_state.json`
-- `analysis` nested run
-- `sklearn` nested run
-- `torch` nested run
+- `analysis` 顶层 run
+- `sklearn` 顶层 run
+- `torch` 顶层 run
 - `mlp` / `cnn1d` / `tabnet` 训练链路接入
 - 同一个用户下的多个 task 共用一个 `mlruns`
 - `auto / grid / halving_grid / optuna` 搜索策略接入
@@ -284,7 +294,9 @@ search:
 
 ---
 
-## 运行结果怎么看
+## 示例结果怎么看
+
+下面这些输出是当前仓库内两个示例 task 跑出来的示例结果，用来说明系统结构与产物位置，不代表你后续换数据后的最终基准结论。
 
 建议优先看这几个文件：
 
@@ -307,6 +319,15 @@ search:
 
 - `storage/user_bizi/task_iris/outputs/analysis/`
 - `storage/user_bizi/task_titanic_dataset/outputs/analysis/`
+
+### 示例数据放置位置
+
+- `storage/user_bizi/task_iris/data/raw/Iris.csv`
+- `storage/user_bizi/task_titanic_dataset/data/raw/Titanic-Dataset.csv`
+
+如果本地还没有这两个文件，先看：
+
+- [DATASET_README.md](/Users/bizi/Desktop/GitHub/homemade-datarobot/DATASET_README.md)
 
 ---
 

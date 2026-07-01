@@ -15,5 +15,10 @@ test/test_data/
 # MLflow 与运行期产物
 mlruns/
 
-# 整个 task 存储目录都不进入版本库
-storage/
+# 默认忽略整个 storage，但保留示例 task 的配置文件进入版本库
+storage/**
+!storage/user_bizi/
+!storage/user_bizi/task_iris/
+!storage/user_bizi/task_titanic_dataset/
+!storage/user_bizi/task_iris/config.yaml
+!storage/user_bizi/task_titanic_dataset/config.yaml

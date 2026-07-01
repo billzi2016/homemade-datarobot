@@ -1,0 +1,100 @@
+project:
+  name: homemade_datarobot
+  random_seed: 42
+
+task:
+  task_id: task_iris
+
+data:
+  input_path: data/raw/Iris.csv
+  file_type: csv
+  target_column: Species
+  drop_columns:
+    - Id
+  task_type: classification
+  test_size: 0.2
+  stratify: true
+
+features:
+  numeric_columns:
+    - SepalLengthCm
+    - SepalWidthCm
+    - PetalLengthCm
+    - PetalWidthCm
+  categorical_columns: []
+  onehot_columns: []
+
+preprocess:
+  numeric_imputer: median
+  categorical_imputer: most_frequent
+  scaler: standard
+  encoder: onehot
+
+analysis:
+  enabled: true
+  pca:
+    enabled: true
+  tsne:
+    enabled: true
+    perplexity: 20
+  umap:
+    enabled: true
+    n_neighbors: 10
+    min_dist: 0.1
+
+search:
+  method: auto
+  n_trials: 4
+  sklearn:
+    xgboost:
+      enabled: true
+  torch:
+    mlp:
+      enabled: true
+
+cv:
+  n_splits: 2
+
+imbalance:
+  enabled: true
+  strategy: auto
+
+models:
+  sklearn:
+    classification:
+      - logistic_regression
+      - svm
+      - random_forest
+      - extra_trees
+      - gradient_boosting
+      - hist_gradient_boosting
+      - decision_tree
+      - knn
+      - gaussian_nb
+      - bernoulli_nb
+      - multinomial_nb
+      - xgboost
+      - lightgbm
+    regression: []
+  torch:
+    classification:
+      - mlp
+      - cnn1d
+      - tabnet
+    regression: []
+
+training:
+  torch:
+    epochs: 25
+    batch_size: 32
+    learning_rate: 0.001
+    hidden_dims:
+      - 64
+      - 32
+    dropout: 0.1
+    early_stopping:
+      patience: 5
+
+mlflow:
+  tracking_uri: file:///Users/bizi/Desktop/GitHub/homemade-datarobot/storage/user_bizi/mlruns
+  experiment_name: task_iris
