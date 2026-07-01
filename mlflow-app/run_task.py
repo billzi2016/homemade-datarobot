@@ -59,7 +59,10 @@ def log_task_level_summary(
     metric_name = summary["primary_metric_name"]
     metric_value = summary["primary_metric_value"]
 
-    mlflow.log_param(f"{summary_prefix}_best_model", best_model_name)
+    # 这里故意不用 param，而改用 tag。
+    # 原因是同一个 task 支持续跑与重跑，最佳模型在不同批次执行后可能发生变化。
+    # MLflow 的 param 一旦写入就不可改值，而 tag 允许覆盖更新，更适合保存“当前最新结论”。
+    mlflow.set_tag(f"{summary_prefix}_best_model", best_model_name)
     mlflow.log_metric(f"{summary_prefix}_{metric_name}", metric_value)
 
     summary_path = summary.get("summary_path")
