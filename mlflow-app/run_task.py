@@ -7,8 +7,8 @@ task 运行入口。
 先跑通一条完整主链路。
 
 设计说明：
-1. 当前阶段不实现 task_id 自动发号，直接使用已有的 task_000001 / task_000002。
-2. 一个 task 对应一个主 MLflow run；analysis / sklearn 各子项用 nested run 记录。
+1. 当前阶段不实现 task_id 自动发号，直接使用已有的 task 名称。
+2. MLflow 不再额外创建主 task run；每个分析项和模型自己直接成为 experiment 顶层 run。
 3. run_state.json 以“人类可读”为第一优先级，因此会明确记录已完成实验列表。
 4. 为了控制写盘量，模型类只保留必要最终产物；analysis 类完整保留 2D 结果。
 5. 搜索策略默认走 auto，不允许把默认路径退化为 none。
@@ -19,9 +19,8 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
-import mlflow
 from analysis_runner import run_analysis
 from sklearn_runner import infer_feature_columns, run_sklearn
 from task_runtime import (
@@ -36,41 +35,6 @@ from task_runtime import (
     save_run_state,
 )
 from torch_runner import run_torch
-
-
-def log_task_level_summary(
-    summary: Dict[str, Any],
-    summary_prefix: str,
-    task_id: str,
-    run_state_path: Path,
-) -> None:
-    """
-    把子模块结果汇总回主 run。
-
-    目的很明确：
-    - 主 run 页面不能再是空的
-    - 用户点开 task 时，至少能直接看到最佳模型和关键指标
-    """
-
-    if not summary:
-        return
-
-    best_model_name = summary["best_model_name"]
-    metric_name = summary["primary_metric_name"]
-    metric_value = summary["primary_metric_value"]
-
-    # 这里故意不用 param，而改用 tag。
-    # 原因是同一个 task 支持续跑与重跑，最佳模型在不同批次执行后可能发生变化。
-    # MLflow 的 param 一旦写入就不可改值，而 tag 允许覆盖更新，更适合保存“当前最新结论”。
-    mlflow.set_tag(f"{summary_prefix}_best_model", best_model_name)
-    mlflow.log_metric(f"{summary_prefix}_{metric_name}", metric_value)
-
-    summary_path = summary.get("summary_path")
-    if summary_path:
-        mlflow.log_artifact(str(summary_path), artifact_path="task_summary")
-
-    if run_state_path.exists():
-        mlflow.log_artifact(str(run_state_path), artifact_path="task_summary")
 
 
 def run_task(task_dir: Path) -> None:
@@ -89,26 +53,14 @@ def run_task(task_dir: Path) -> None:
 
     state["status"] = "running"
     state["current_stage"] = "bootstrap"
+    state["main_run_id"] = None
     save_run_state(paths, state)
+    import mlflow
 
     mlflow.set_tracking_uri(config.get("mlflow", {}).get("tracking_uri", str(paths.mlruns_dir)))
     mlflow.set_experiment(config.get("mlflow", {}).get("experiment_name", "homemade_datarobot"))
 
-    existing_run_id = state.get("main_run_id")
-    run_context = (
-        mlflow.start_run(run_id=existing_run_id)
-        if existing_run_id
-        else mlflow.start_run(run_name=task_id)
-    )
-
-    with run_context as main_run:
-        state["main_run_id"] = main_run.info.run_id
-        save_run_state(paths, state)
-
-        mlflow.set_tag("task_id", task_id)
-        mlflow.set_tag("run_level", "task")
-        mlflow.log_dict(config, "config_snapshot.yaml")
-
+    try:
         df = read_dataset(paths, config)
         mark_step_completed(state, "data_loaded")
         save_run_state(paths, state)
@@ -123,24 +75,16 @@ def run_task(task_dir: Path) -> None:
         save_run_state(paths, state)
 
         run_analysis(config, target_series, feature_df, paths, state)
-        sklearn_summary = run_sklearn(config, df, paths, state)
-        torch_summary = run_torch(config, df, paths, state)
+        run_sklearn(config, df, paths, state)
+        run_torch(config, df, paths, state)
 
         state["status"] = "completed"
         state["current_stage"] = "completed"
         save_run_state(paths, state)
-        log_task_level_summary(
-            sklearn_summary,
-            summary_prefix="sklearn",
-            task_id=task_id,
-            run_state_path=paths.run_state_path,
-        )
-        log_task_level_summary(
-            torch_summary,
-            summary_prefix="torch",
-            task_id=task_id,
-            run_state_path=paths.run_state_path,
-        )
+    except Exception:
+        state["status"] = "failed"
+        save_run_state(paths, state)
+        raise
 
 
 def parse_args() -> argparse.Namespace:

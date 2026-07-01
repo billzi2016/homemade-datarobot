@@ -194,7 +194,10 @@ def classification_model_registry(random_seed: int) -> Dict[str, Any]:
             n_estimators=200, random_state=random_seed, n_jobs=1
         ),
         "gradient_boosting": GradientBoostingClassifier(random_state=random_seed),
-        "hist_gradient_boosting": HistGradientBoostingClassifier(random_state=random_seed),
+        "hist_gradient_boosting": HistGradientBoostingClassifier(
+            random_state=random_seed,
+            max_iter=40,
+        ),
         "decision_tree": DecisionTreeClassifier(random_state=random_seed),
         "knn": KNeighborsClassifier(),
         "gaussian_nb": GaussianNB(),
@@ -243,7 +246,10 @@ def regression_model_registry(random_seed: int) -> Dict[str, Any]:
             n_estimators=200, random_state=random_seed, n_jobs=1
         ),
         "gradient_boosting": GradientBoostingRegressor(random_state=random_seed),
-        "hist_gradient_boosting": HistGradientBoostingRegressor(random_state=random_seed),
+        "hist_gradient_boosting": HistGradientBoostingRegressor(
+            random_state=random_seed,
+            max_iter=40,
+        ),
         "decision_tree": DecisionTreeRegressor(random_state=random_seed),
         "knn": KNeighborsRegressor(),
         "xgboost": XGBRegressor(
@@ -443,9 +449,9 @@ def build_search_grid(task_type: str, model_name: str) -> Dict[str, List[Any]]:
                 "max_depth": [2, 3],
             },
             "hist_gradient_boosting": {
-                "learning_rate": [0.03, 0.1],
-                "max_depth": [None, 6, 12],
-                "max_leaf_nodes": [15, 31],
+                "learning_rate": [0.05, 0.1],
+                "max_depth": [None, 6],
+                "max_leaf_nodes": [15],
             },
             "decision_tree": {
                 "max_depth": [None, 4, 8, 12],
@@ -488,9 +494,9 @@ def build_search_grid(task_type: str, model_name: str) -> Dict[str, List[Any]]:
                 "max_depth": [2, 3],
             },
             "hist_gradient_boosting": {
-                "learning_rate": [0.03, 0.1],
-                "max_depth": [None, 6, 12],
-                "max_leaf_nodes": [15, 31],
+                "learning_rate": [0.05, 0.1],
+                "max_depth": [None, 6],
+                "max_leaf_nodes": [15],
             },
             "decision_tree": {
                 "max_depth": [None, 4, 8, 12],
@@ -531,8 +537,8 @@ def suggest_model_params(trial: optuna.Trial, task_type: str, model_name: str) -
     if model_name in {"gradient_boosting", "hist_gradient_boosting"}:
         return {
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
-            "max_depth": trial.suggest_categorical("max_depth", [None, 3, 6, 10]),
-            "max_leaf_nodes": trial.suggest_categorical("max_leaf_nodes", [15, 31, 63]),
+            "max_depth": trial.suggest_categorical("max_depth", [None, 3, 6]),
+            "max_leaf_nodes": trial.suggest_categorical("max_leaf_nodes", [15, 31]),
         } if model_name == "hist_gradient_boosting" else {
             "n_estimators": trial.suggest_int("n_estimators", 80, 220, step=20),
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
@@ -865,7 +871,13 @@ def run_sklearn(
             ]
         )
 
-        with mlflow.start_run(run_name=f"sklearn.{model_name}", nested=True):
+        with mlflow.start_run(run_name=model_name):
+            mlflow.set_tag("task_id", config["task"]["task_id"])
+            mlflow.set_tag("run_level", "item")
+            mlflow.set_tag("item_name", model_name)
+            mlflow.set_tag("item_kind", "model")
+            mlflow.set_tag("model_family", "sklearn")
+            mlflow.log_dict(config, "config_snapshot.yaml")
             trained_pipeline, search_info = run_search_for_pipeline(
                 config=config,
                 task_type=task_type,

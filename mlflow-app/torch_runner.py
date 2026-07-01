@@ -589,7 +589,13 @@ def run_torch(
         state["current_stage"] = f"torch.{model_name}"
         save_run_state(paths, state)
 
-        with mlflow.start_run(run_name=f"torch.{model_name}", nested=True):
+        with mlflow.start_run(run_name=model_name):
+            mlflow.set_tag("task_id", config["task"]["task_id"])
+            mlflow.set_tag("run_level", "item")
+            mlflow.set_tag("item_name", model_name)
+            mlflow.set_tag("item_kind", "model")
+            mlflow.set_tag("model_family", "torch")
+            mlflow.log_dict(config, "config_snapshot.yaml")
             training_cfg = dict(config.get("training", {}).get("torch", {}))
             search_method = resolve_search_method(
                 config=config,
@@ -727,13 +733,4 @@ def run_torch(
         summary_df = pd.DataFrame(summary_rows).sort_values(by=primary_sort_key, ascending=False)
         summary_path = paths.metrics_dir / "torch_summary.csv"
         save_dataframe(summary_path, summary_df)
-        best_row = summary_df.iloc[0].to_dict()
-        return {
-            "summary_path": summary_path,
-            "summary_rows": summary_rows,
-            "best_model_name": best_row["model_name"],
-            "primary_metric_name": primary_sort_key,
-            "primary_metric_value": float(best_row[primary_sort_key]),
-        }
-
     return {}

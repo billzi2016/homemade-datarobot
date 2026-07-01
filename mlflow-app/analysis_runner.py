@@ -8,7 +8,7 @@ analysis 执行模块。
 
 设计要求：
 - analysis 类结果完整保留 2D 坐标结果
-- analysis 类步骤使用 nested run 记录
+- analysis 类步骤直接作为 experiment 顶层 run 记录
 - 完成状态同步写入 run_state.json
 """
 
@@ -100,7 +100,12 @@ def run_analysis(
         state["current_stage"] = f"analysis.{name}"
         save_run_state(paths, state)
 
-        with mlflow.start_run(run_name=f"analysis.{name}", nested=True):
+        with mlflow.start_run(run_name=name):
+            mlflow.set_tag("task_id", config["task"]["task_id"])
+            mlflow.set_tag("run_level", "item")
+            mlflow.set_tag("item_name", name)
+            mlflow.set_tag("item_kind", "analysis")
+            mlflow.log_dict(config, "config_snapshot.yaml")
             if name == "pca":
                 reducer = PCA(n_components=2, random_state=config["project"]["random_seed"])
                 coords = reducer.fit_transform(analysis_input_values)
