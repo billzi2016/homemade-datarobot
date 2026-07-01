@@ -19,7 +19,10 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List
+
+import mlflow
+import pandas as pd
 
 from analysis_runner import run_analysis
 from sklearn_runner import infer_feature_columns, run_sklearn
@@ -35,6 +38,61 @@ from task_runtime import (
     save_run_state,
 )
 from torch_runner import run_torch
+
+
+def build_leaderboard_rows(
+    summaries: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    统一拼装排行榜明细。
+
+    这里不再按 sklearn / torch 做 UI 层级，而是把所有模型直接拉平到一个排行榜表里。
+    """
+
+    rows: List[Dict[str, Any]] = []
+    for summary in summaries:
+        if not summary:
+            continue
+        source_name = str(summary.get("source_name", "model"))
+        for row in summary.get("summary_rows", []):
+            rows.append({"source_name": source_name, **row})
+    return rows
+
+
+def log_leaderboard_run(
+    config: Dict[str, Any],
+    paths: TaskPaths,
+    leaderboard_rows: List[Dict[str, Any]],
+) -> None:
+    """把综合排行榜作为单独顶层 run 写入 MLflow。"""
+
+    if not leaderboard_rows:
+        return
+
+    leaderboard_df = pd.DataFrame(leaderboard_rows)
+    preferred_metrics = ["accuracy", "f1_macro", "roc_auc", "roc_auc_ovr", "rmse", "r2"]
+    sort_metric = next((name for name in preferred_metrics if name in leaderboard_df.columns), None)
+    if sort_metric is not None:
+        ascending = sort_metric == "rmse"
+        leaderboard_df = leaderboard_df.sort_values(by=sort_metric, ascending=ascending)
+
+    leaderboard_path = paths.metrics_dir / "leaderboard.csv"
+    leaderboard_df.to_csv(leaderboard_path, index=False)
+
+    with mlflow.start_run(run_name="leaderboard"):
+        mlflow.set_tag("task_id", config["task"]["task_id"])
+        mlflow.set_tag("run_level", "item")
+        mlflow.set_tag("item_name", "leaderboard")
+        mlflow.set_tag("item_kind", "leaderboard")
+        mlflow.log_dict(config, "config_snapshot.yaml")
+        mlflow.log_param("row_count", int(len(leaderboard_df)))
+        if sort_metric is not None:
+            mlflow.log_param("primary_sort_metric", sort_metric)
+            best_row = leaderboard_df.iloc[0].to_dict()
+            mlflow.set_tag("best_model_name", str(best_row.get("model_name")))
+            if sort_metric in best_row and pd.notna(best_row[sort_metric]):
+                mlflow.log_metric(f"best_{sort_metric}", float(best_row[sort_metric]))
+        mlflow.log_artifact(str(leaderboard_path), artifact_path="leaderboard")
 
 
 def run_task(task_dir: Path) -> None:
@@ -55,7 +113,6 @@ def run_task(task_dir: Path) -> None:
     state["current_stage"] = "bootstrap"
     state["main_run_id"] = None
     save_run_state(paths, state)
-    import mlflow
 
     mlflow.set_tracking_uri(config.get("mlflow", {}).get("tracking_uri", str(paths.mlruns_dir)))
     mlflow.set_experiment(config.get("mlflow", {}).get("experiment_name", "homemade_datarobot"))
@@ -75,8 +132,14 @@ def run_task(task_dir: Path) -> None:
         save_run_state(paths, state)
 
         run_analysis(config, target_series, feature_df, paths, state)
-        run_sklearn(config, df, paths, state)
-        run_torch(config, df, paths, state)
+        sklearn_summary = run_sklearn(config, df, paths, state)
+        if sklearn_summary:
+            sklearn_summary["source_name"] = "sklearn"
+        torch_summary = run_torch(config, df, paths, state)
+        if torch_summary:
+            torch_summary["source_name"] = "torch"
+        leaderboard_rows = build_leaderboard_rows([sklearn_summary, torch_summary])
+        log_leaderboard_run(config, paths, leaderboard_rows)
 
         state["status"] = "completed"
         state["current_stage"] = "completed"

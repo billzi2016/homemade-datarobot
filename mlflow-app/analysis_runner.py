@@ -105,8 +105,13 @@ def run_analysis(
             mlflow.set_tag("run_level", "item")
             mlflow.set_tag("item_name", name)
             mlflow.set_tag("item_kind", "analysis")
+            mlflow.log_param("sample_count", int(len(feature_df)))
+            mlflow.log_param("feature_count", int(feature_df.shape[1]))
+            mlflow.log_param("analysis_input_feature_count", int(analysis_input.shape[1]))
             mlflow.log_dict(config, "config_snapshot.yaml")
             if name == "pca":
+                mlflow.log_param("method", "pca")
+                mlflow.log_param("n_components", 2)
                 reducer = PCA(n_components=2, random_state=config["project"]["random_seed"])
                 coords = reducer.fit_transform(analysis_input_values)
                 mlflow.log_metric(
@@ -115,6 +120,9 @@ def run_analysis(
                 )
             elif name == "tsne":
                 tsne_cfg = analysis_cfg.get("tsne", {})
+                mlflow.log_param("method", "tsne")
+                mlflow.log_param("n_components", 2)
+                mlflow.log_param("perplexity", tsne_cfg.get("perplexity", 30))
                 reducer = TSNE(
                     n_components=2,
                     perplexity=tsne_cfg.get("perplexity", 30),
@@ -130,6 +138,10 @@ def run_analysis(
                     mlflow.log_param("skipped_reason", f"umap_unavailable: {exc}")
                     continue
                 umap_cfg = analysis_cfg.get("umap", {})
+                mlflow.log_param("method", "umap")
+                mlflow.log_param("n_components", 2)
+                mlflow.log_param("n_neighbors", umap_cfg.get("n_neighbors", 15))
+                mlflow.log_param("min_dist", umap_cfg.get("min_dist", 0.1))
                 reducer = umap.UMAP(
                     n_components=2,
                     n_neighbors=umap_cfg.get("n_neighbors", 15),
@@ -148,6 +160,8 @@ def run_analysis(
             result_path = paths.analysis_dir / f"{name}_2d.csv"
             save_dataframe(result_path, result_df)
             mlflow.log_artifact(str(result_path), artifact_path="analysis")
+            mlflow.log_metric("point_count", int(len(result_df)))
+            mlflow.log_metric("target_class_count", int(result_df["target"].nunique()))
 
             plot_path = paths.plots_dir / f"{name}_scatter.png"
             save_analysis_scatter_plot(result_df, plot_path, title=f"{name.upper()} 2D Scatter")

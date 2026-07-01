@@ -733,4 +733,12 @@ def run_torch(
         summary_df = pd.DataFrame(summary_rows).sort_values(by=primary_sort_key, ascending=False)
         summary_path = paths.metrics_dir / "torch_summary.csv"
         save_dataframe(summary_path, summary_df)
+        best_row = summary_df.iloc[0].to_dict()
+        return {
+            "summary_path": summary_path,
+            "summary_rows": summary_rows,
+            "best_model_name": best_row["model_name"],
+            "primary_metric_name": primary_sort_key,
+            "primary_metric_value": float(best_row[primary_sort_key]),
+        }
     return {}
