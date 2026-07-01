@@ -238,15 +238,13 @@ def log_leaderboard_run(
             best_row = leaderboard_df.iloc[0].to_dict()
             mlflow.set_tag("best_model_name", str(best_row.get("model_name")))
             mlflow.set_tag("best_source_name", str(best_row.get("source_name")))
-            if sort_metric in best_row and pd.notna(best_row[sort_metric]):
-                mlflow.log_metric(f"best_{sort_metric}", float(best_row[sort_metric]))
         for metric_name in ["accuracy", "f1_macro", "auc"]:
             if metric_name in leaderboard_df.columns:
                 top_metric_series = leaderboard_df[metric_name].dropna()
                 if not top_metric_series.empty:
-                    mlflow.log_metric(f"best_{metric_name}", float(top_metric_series.max()))
                     best_metric_row = leaderboard_df.loc[top_metric_series.idxmax()]
                     mlflow.log_param(f"best_{metric_name}_model", str(best_metric_row["model_name"]))
+                    mlflow.log_param(f"best_{metric_name}_value", float(top_metric_series.max()))
         mlflow.log_artifact(str(leaderboard_path), artifact_path="leaderboard")
         mlflow.log_artifact(str(leaderboard_payload_path), artifact_path="leaderboard")
         mlflow.log_artifact(str(leaderboard_plot_path), artifact_path="leaderboard")
