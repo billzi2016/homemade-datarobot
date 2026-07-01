@@ -15,4 +15,6 @@ urlpatterns = [
     path("tasks/<str:task_id>/events/", views.task_events_view, name="task-events"),
     path("tasks/<str:task_id>/download/", views.task_download_list_view, name="task-download-list"),
     path("tasks/<str:task_id>/download/file/", views.task_file_download_view, name="task-file-download"),
+    path("mlflow/open/", views.mlflow_open_view, name="mlflow-open"),
+    path("mlflow/stop/", views.mlflow_stop_view, name="mlflow-stop"),
 ]

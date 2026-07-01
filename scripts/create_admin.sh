@@ -30,7 +30,9 @@ DJANGO_ADMIN_EMAIL="$DJANGO_ADMIN_EMAIL" \
 DJANGO_ADMIN_PASSWORD="$DJANGO_ADMIN_PASSWORD" \
 python3 manage.py shell -c "
 import os
+import hashlib
 from django.contrib.auth import get_user_model
+from accounts.models import UserProfile
 
 User = get_user_model()
 username = os.environ['DJANGO_ADMIN_USERNAME']
@@ -43,6 +45,8 @@ user.is_staff = True
 user.is_superuser = True
 user.set_password(password)
 user.save()
+email_digest = hashlib.sha256(email.strip().lower().encode('utf-8')).hexdigest()
+UserProfile.objects.update_or_create(user=user, defaults={'email_sha256': email_digest})
 
 print(f'admin user ready: {username}')
 "

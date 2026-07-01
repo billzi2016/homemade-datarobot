@@ -63,6 +63,7 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    "accounts",
     "tasks",
 ]
 
@@ -73,6 +74,7 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "homemade_datarobot_web.security.AuthenticatedApiDocsMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
@@ -114,6 +116,9 @@ STATIC_URL = "/static/"
 STATICFILES_DIRS = [BASE_DIR / "static"]
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+LOGIN_URL = "login"
+LOGIN_REDIRECT_URL = "task-list"
+LOGOUT_REDIRECT_URL = "login"
 
 # 浏览器侧基础安全配置。当前是本地开发项目，所以不强制 HTTPS；
 # 后续如果部署到公网，再开启 SECURE_SSL_REDIRECT / secure cookie。
@@ -127,12 +132,14 @@ CSRF_TRUSTED_ORIGINS = [
     "http://localhost:18743",
 ]
 
-# 当前阶段默认使用 user_bizi 这层目录；后面接入鉴权后再替换成真实用户空间。
+# 默认值兼容本地示例；实际请求中会按 request.user.username 映射到 storage/user_xxx。
 TASK_STORAGE_ROOT = env_path("TASK_STORAGE_ROOT", BASE_DIR / "storage" / "user_bizi")
 
-# Django 页面里提供一个直达 MLflow 的链接。
-# README 里约定 MLflow UI 使用 5001；如果本机换端口，只需要改这里。
-MLFLOW_UI_BASE_URL = os.environ.get("MLFLOW_UI_BASE_URL", "http://127.0.0.1:5001")
+# Django 托管本地 MLflow UI 进程时使用的端口池。
+# 每个登录用户会复用自己的 user_xxx/mlruns；端口从池里选择空闲值，避免多人同时使用时冲突。
+MLFLOW_UI_HOST = os.environ.get("MLFLOW_UI_HOST", "127.0.0.1")
+MLFLOW_UI_PORT_START = int(os.environ.get("MLFLOW_UI_PORT_START", "5001"))
+MLFLOW_UI_PORT_END = int(os.environ.get("MLFLOW_UI_PORT_END", "5099"))
 
 # 本地子进程执行时，仍然复用现有训练入口。
 MLFLOW_RUN_TASK_SCRIPT = BASE_DIR / "mlflow-app" / "run_task.py"

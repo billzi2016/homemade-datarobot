@@ -11,6 +11,9 @@
 
 from __future__ import annotations
 
+from django.contrib.auth.views import redirect_to_login
+from django.urls import reverse
+
 
 class SecurityHeadersMiddleware:
     """为所有 Django 响应补基础安全头。"""
@@ -28,9 +31,9 @@ class SecurityHeadersMiddleware:
             "Content-Security-Policy",
             (
                 "default-src 'self'; "
-                "script-src 'self' 'unsafe-inline'; "
-                "style-src 'self' 'unsafe-inline'; "
-                "img-src 'self' data: blob:; "
+                "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+                "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+                "img-src 'self' data: blob: https://django-ninja.dev; "
                 "font-src 'self' data:; "
                 "connect-src 'self' http://127.0.0.1:* http://localhost:*; "
                 "frame-ancestors 'none'; "
@@ -39,3 +42,22 @@ class SecurityHeadersMiddleware:
             ),
         )
         return response
+
+
+class AuthenticatedApiDocsMiddleware:
+    """
+    限制 API 文档入口必须登录后访问。
+
+    django-ninja 会自动暴露 Swagger UI 和 OpenAPI JSON；这些页面虽然不是业务写接口，
+    但会完整暴露当前 API 的路径、参数和响应结构，所以应该和业务页面使用同一套登录边界。
+    """
+
+    PROTECTED_PATHS = {"/api/docs", "/api/openapi.json"}
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        if request.path.rstrip("/") in self.PROTECTED_PATHS and not request.user.is_authenticated:
+            return redirect_to_login(request.get_full_path(), login_url=reverse("login"))
+        return self.get_response(request)

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -68,8 +69,47 @@ class TaskSummary:
     state: Dict[str, Any]
 
 
-def storage_root() -> Path:
-    return Path(settings.TASK_STORAGE_ROOT)
+def storage_base_root() -> Path:
+    """
+    返回用户目录的父目录。
+
+    兼容当前 .env 里的历史写法：
+    TASK_STORAGE_ROOT=storage/user_bizi
+
+    如果配置值本身是 user_xxx，就取它的 parent 作为用户空间根目录；
+    否则把配置值当作用户空间根目录。
+    """
+
+    configured_root = Path(settings.TASK_STORAGE_ROOT)
+    if configured_root.name.startswith("user_"):
+        return configured_root.parent
+    return configured_root
+
+
+def safe_username_slug(username: str) -> str:
+    """把用户名转成可用于目录名的安全片段。"""
+
+    lowered = username.strip().lower()
+    slug = re.sub(r"[^a-z0-9_]+", "_", lowered)
+    slug = re.sub(r"_+", "_", slug).strip("_")
+    if not slug:
+        raise ValueError("用户名无法转换为有效存储目录。")
+    return slug
+
+
+def storage_root(user=None) -> Path:
+    """
+    当前登录用户的 storage 根目录。
+
+    - user.username == bizi  -> storage/user_bizi
+    - user.username == admin -> storage/user_admin
+
+    如果没有传 user，保留历史 fallback，便于少量非请求上下文代码继续工作。
+    """
+
+    if user is None:
+        return Path(settings.TASK_STORAGE_ROOT)
+    return storage_base_root() / f"user_{safe_username_slug(user.username)}"
 
 
 def parse_csv_text(raw_value: str) -> List[str]:
@@ -80,10 +120,10 @@ def parse_csv_text(raw_value: str) -> List[str]:
     return [item.strip() for item in raw_value.replace("\n", ",").split(",") if item.strip()]
 
 
-def task_directories() -> List[Path]:
+def task_directories(user=None) -> List[Path]:
     """扫描当前用户空间下的全部任务目录。"""
 
-    root = storage_root()
+    root = storage_root(user)
     if not root.exists():
         return []
     return sorted(
@@ -112,10 +152,10 @@ def load_task_summary(task_dir: Path) -> TaskSummary:
     return TaskSummary(task_id=task_dir.name, task_dir=task_dir, config=config, state=state)
 
 
-def list_task_summaries() -> List[TaskSummary]:
+def list_task_summaries(user=None) -> List[TaskSummary]:
     """加载全部任务，供列表页展示。"""
 
-    return [load_task_summary(task_dir) for task_dir in task_directories()]
+    return [load_task_summary(task_dir) for task_dir in task_directories(user)]
 
 
 def ensure_task_layout(task_dir: Path) -> None:
@@ -140,7 +180,7 @@ def ensure_task_layout(task_dir: Path) -> None:
         path.mkdir(parents=True, exist_ok=True)
 
 
-def default_task_config(cleaned_data: Dict[str, Any], uploaded_filename: str) -> Dict[str, Any]:
+def default_task_config(cleaned_data: Dict[str, Any], uploaded_filename: str, user_root: Path) -> Dict[str, Any]:
     """
     根据表单生成首版 config.yaml。
 
@@ -222,7 +262,7 @@ def default_task_config(cleaned_data: Dict[str, Any], uploaded_filename: str) ->
             "primary_metric": cleaned_data["primary_metric"],
         },
         "mlflow": {
-            "tracking_uri": f"file://{storage_root() / 'mlruns'}",
+            "tracking_uri": f"file://{user_root / 'mlruns'}",
             "experiment_name": task_id,
         },
     }
@@ -252,16 +292,17 @@ def save_uploaded_dataset(task_dir: Path, uploaded_file) -> str:
     return file_name
 
 
-def create_task_from_form(cleaned_data: Dict[str, Any], uploaded_file) -> Path:
+def create_task_from_form(cleaned_data: Dict[str, Any], uploaded_file, user=None) -> Path:
     """从前端表单创建一个完整的任务目录。"""
 
-    task_dir = storage_root() / cleaned_data["task_name"]
+    user_root = storage_root(user)
+    task_dir = user_root / cleaned_data["task_name"]
     if task_dir.exists():
         raise ValueError(f"任务目录已存在：{task_dir.name}")
 
     ensure_task_layout(task_dir)
     uploaded_filename = save_uploaded_dataset(task_dir, uploaded_file)
-    config = default_task_config(cleaned_data, uploaded_filename)
+    config = default_task_config(cleaned_data, uploaded_filename, user_root)
     write_task_config(task_dir, config)
     return task_dir
 
@@ -391,7 +432,7 @@ def build_task_status_payload(task_dir: Path) -> Dict[str, Any]:
         "progress_label": progress["progress_label"],
         "completed_unit_count": progress["completed_unit_count"],
         "total_unit_count": progress["total_unit_count"],
-        "mlflow_url": settings.MLFLOW_UI_BASE_URL,
+        "mlflow_url": "/mlflow/open/",
         "task_dir": str(task_dir),
         "config_path": str(task_dir / "config.yaml"),
         "outputs_dir": str(outputs_dir),

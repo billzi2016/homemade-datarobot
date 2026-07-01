@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+
+{% block title %}登录{% endblock %}
+
+{% block content %}
+<div class="auth-panel panel">
+  <h2>登录</h2>
+  <form method="post">
+    {% csrf_token %}
+    {% if form.non_field_errors %}
+      <div class="message">{{ form.non_field_errors }}</div>
+    {% endif %}
+    {% for field in form %}
+      <div style="margin-bottom:16px;">
+        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+        {{ field }}
+        {% if field.errors %}
+          <div style="margin-top:6px;color:#bf1d2d;">{{ field.errors }}</div>
+        {% endif %}
+      </div>
+    {% endfor %}
+    <button class="primary" type="submit">登录</button>
+  </form>
+  <div class="muted" style="margin-top:16px;">
+    <a href="{% url 'register' %}">注册新用户</a>
+    ·
+    <a href="{% url 'password-reset' %}">忘记密码</a>
+  </div>
+</div>
+{% endblock %}

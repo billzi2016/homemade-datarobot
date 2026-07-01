@@ -11,5 +11,6 @@ from tasks.api import api
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/", api.urls),
+    path("accounts/", include("accounts.urls")),
     path("", include("tasks.urls")),
 ]

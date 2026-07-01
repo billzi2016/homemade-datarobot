@@ -13,9 +13,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from ninja import NinjaAPI, Schema
 from django.views.decorators.csrf import csrf_protect
+from ninja import NinjaAPI, Schema
+from ninja.errors import HttpError
 
+from tasks.mlflow_ui import ensure_mlflow_ui, mlflow_status, stop_mlflow_ui
 from tasks.services import (
     build_task_status_payload,
     download_records,
@@ -89,20 +91,57 @@ class DownloadRecord(Schema):
     mime_type: str
 
 
-def resolve_task_dir_or_404(task_id: str):
-    task_dir = storage_root() / task_id
+class MlflowUiStatus(Schema):
+    """当前用户 MLflow UI 状态。"""
+
+    running: bool
+    pid: Optional[int] = None
+    port: Optional[int] = None
+    url: Optional[str] = None
+    backend_store_uri: Optional[str] = None
+    meta_path: str
+    log_path: Optional[str] = None
+
+
+class MlflowUiStartResponse(Schema):
+    """当前用户 MLflow UI 启动或复用结果。"""
+
+    pid: int
+    port: int
+    url: str
+    backend_store_uri: str
+
+
+class MlflowUiStopResponse(Schema):
+    """当前用户 MLflow UI 停止结果。"""
+
+    stopped: bool
+    stopped_pids: List[int]
+    port: Optional[int] = None
+    meta_path: str
+
+
+def resolve_task_dir_or_404(request, task_id: str):
+    task_dir = storage_root(request.user) / task_id
     if not task_dir.exists():
-        # django-ninja 会把这个响应直接序列化给调用方。
-        raise FileNotFoundError(f"任务不存在：{task_id}")
+        raise HttpError(404, f"任务不存在：{task_id}")
     return task_dir
+
+
+def require_authenticated(request) -> None:
+    """API 层显式要求登录，避免绕过 Django 页面直接操作任务。"""
+
+    if not request.user.is_authenticated:
+        raise HttpError(401, "需要登录。")
 
 
 @api.get("/tasks", response=List[TaskListItem], tags=["tasks"])
 def list_tasks(request) -> List[Dict[str, Any]]:
     """列出当前用户空间里的全部 task。"""
 
+    require_authenticated(request)
     rows: List[Dict[str, Any]] = []
-    for summary in list_task_summaries():
+    for summary in list_task_summaries(request.user):
         state = summary.state
         rows.append(
             {
@@ -121,7 +160,8 @@ def list_tasks(request) -> List[Dict[str, Any]]:
 def get_task_status(request, task_id: str) -> Dict[str, Any]:
     """读取单个 task 的状态、进度、日志尾部和 MLflow 入口。"""
 
-    task_dir = resolve_task_dir_or_404(task_id)
+    require_authenticated(request)
+    task_dir = resolve_task_dir_or_404(request, task_id)
     return build_task_status_payload(task_dir)
 
 
@@ -130,7 +170,8 @@ def get_task_status(request, task_id: str) -> Dict[str, Any]:
 def run_task(request, task_id: str) -> Dict[str, Any]:
     """启动单个 task 的本地训练子进程。"""
 
-    task_dir = resolve_task_dir_or_404(task_id)
+    require_authenticated(request)
+    task_dir = resolve_task_dir_or_404(request, task_id)
     state = read_run_state(task_dir)
     pid = state.get("pid")
     if process_is_running(pid):
@@ -153,5 +194,38 @@ def run_task(request, task_id: str) -> Dict[str, Any]:
 def list_downloads(request, task_id: str) -> List[Dict[str, Any]]:
     """列出单个 task 目录下可下载的配置、状态、指标、图表和模型文件。"""
 
-    task_dir = resolve_task_dir_or_404(task_id)
+    require_authenticated(request)
+    task_dir = resolve_task_dir_or_404(request, task_id)
     return download_records(task_dir)
+
+
+@api.get("/mlflow/status", response=MlflowUiStatus, tags=["mlflow"])
+def get_mlflow_ui_status(request) -> Dict[str, Any]:
+    """读取当前登录用户的 MLflow UI 进程状态。"""
+
+    require_authenticated(request)
+    return mlflow_status(request.user)
+
+
+@api.post("/mlflow/start", response=MlflowUiStartResponse, tags=["mlflow"])
+@csrf_protect
+def start_mlflow_ui(request) -> Dict[str, Any]:
+    """启动或复用当前登录用户的 MLflow UI。"""
+
+    require_authenticated(request)
+    instance = ensure_mlflow_ui(request.user)
+    return {
+        "pid": instance.pid,
+        "port": instance.port,
+        "url": instance.url,
+        "backend_store_uri": instance.backend_store_uri,
+    }
+
+
+@api.post("/mlflow/stop", response=MlflowUiStopResponse, tags=["mlflow"])
+@csrf_protect
+def stop_mlflow_ui_endpoint(request) -> Dict[str, Any]:
+    """停止当前登录用户的 MLflow UI。"""
+
+    require_authenticated(request)
+    return stop_mlflow_ui(request.user)

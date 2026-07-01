@@ -39,6 +39,7 @@
       display: flex;
       gap: 12px;
       flex-wrap: wrap;
+      align-items: center;
     }
     .nav a, .button, button {
       border: 1px solid var(--line);
@@ -219,9 +220,16 @@
         <div class="muted" style="margin-top:6px;">Django 业务壳层 + MLflow 训练内核</div>
       </div>
       <div class="nav">
-        <a href="{% url 'task-list' %}">任务列表</a>
-        <a href="{% url 'task-create' %}">创建任务</a>
-        <a href="/api/docs" target="_blank">API 文档</a>
+        {% if request.user.is_authenticated %}
+          <span class="muted">当前用户：{{ request.user.username }}</span>
+          <a href="{% url 'task-list' %}">任务列表</a>
+          <a href="{% url 'task-create' %}">创建任务</a>
+          <a href="/api/docs" target="_blank">API 文档</a>
+          <a href="{% url 'logout' %}">退出</a>
+        {% else %}
+          <a href="{% url 'login' %}">登录</a>
+          <a href="{% url 'register' %}">注册</a>
+        {% endif %}
       </div>
     </div>
     {% if messages %}

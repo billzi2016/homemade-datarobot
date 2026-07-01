@@ -15,7 +15,14 @@
           {% csrf_token %}
           <button class="primary" type="submit">启动任务</button>
         </form>
-        <a class="button" href="{{ status_payload.mlflow_url }}" target="_blank">打开 MLflow</a>
+        <a class="button" href="{{ mlflow_open_url }}" target="_blank">打开 MLflow</a>
+        {% if mlflow_status.running %}
+          <form method="post" action="{{ mlflow_stop_url }}">
+            {% csrf_token %}
+            <input type="hidden" name="next" value="{{ request.path }}">
+            <button type="submit">停止 MLflow</button>
+          </form>
+        {% endif %}
         <a class="button" href="{{ download_url }}">下载产物</a>
       </div>
     </div>
@@ -39,6 +46,14 @@
       <div class="muted">可下载文件数</div><div id="download-count-value">{{ status_payload.downloadable_count }}</div>
       <div class="muted">配置文件</div><div>{{ status_payload.config_path }}</div>
       <div class="muted">输出目录</div><div>{{ status_payload.outputs_dir }}</div>
+      <div class="muted">MLflow UI</div>
+      <div>
+        {% if mlflow_status.running %}
+          运行中：PID={{ mlflow_status.pid }} / port={{ mlflow_status.port }}
+        {% else %}
+          未启动，点击“打开 MLflow”后自动启动
+        {% endif %}
+      </div>
     </div>
   </div>
 

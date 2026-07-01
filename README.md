@@ -159,7 +159,7 @@ storage/user_bizi/mlruns/
 
 - task 自己保存自己的数据、结果、状态
 - 同一个用户名下的多个 task 共用一个 `mlruns`
-- 因此一个用户只需要启动一个 MLflow UI
+- Django 会为每个用户自动启动或复用一个 MLflow UI
 
 ---
 
@@ -210,10 +210,22 @@ DJANGO_ALLOWED_HOSTS
 DJANGO_RUNSERVER_HOST
 DJANGO_RUNSERVER_PORT
 TASK_STORAGE_ROOT
-MLFLOW_UI_BASE_URL
+MLFLOW_UI_HOST
+MLFLOW_UI_PORT_START
+MLFLOW_UI_PORT_END
 DJANGO_ADMIN_USERNAME
 DJANGO_ADMIN_EMAIL
 DJANGO_ADMIN_PASSWORD
+DJANGO_APP_USERNAME
+DJANGO_APP_EMAIL
+DJANGO_APP_PASSWORD
+```
+
+当前任务目录会按登录用户名隔离：
+
+```text
+username=bizi  -> storage/user_bizi
+username=admin -> storage/user_admin
 ```
 
 ### 启动 Django 业务页面
@@ -258,17 +270,20 @@ DJANGO_ADMIN_PASSWORD
 
 当前 Django 页面支持：
 
+- 注册、登录、退出
+- 使用用户名 + 邮箱 SHA256 校验重置密码
 - 查看 `storage/user_bizi/task_*` 任务列表
 - 创建新任务并上传数据
 - 在任务详情页启动训练子进程
 - 通过 SSE 刷新状态和任务级进度条
 - 查看最近训练日志
 - 下载 task 目录下的配置、状态、预测、指标、图表和模型文件
-- 跳转到 MLflow UI
+- 自动启动或复用当前用户自己的 MLflow UI
 
 ### OpenAPI / Swagger 页面
 
 当前 API 使用 `django-ninja`，因此 OpenAPI 与 Swagger UI 是框架自动生成的真实页面。
+API 文档入口和业务页面使用同一套登录边界，必须登录后才能访问。
 
 固定入口：
 
@@ -296,18 +311,24 @@ http://127.0.0.1:18743/api/openapi.json
 - `GET /api/tasks/{task_id}`
 - `POST /api/tasks/{task_id}/run`
 - `GET /api/tasks/{task_id}/downloads`
+- `GET /api/mlflow/status`
+- `POST /api/mlflow/start`
+- `POST /api/mlflow/stop`
 
 安全说明：
 
 - Django 页面表单启用 CSRF token
+- API 文档入口 `/api/docs` 和 `/api/openapi.json` 必须登录后访问
 - `django-ninja` 的写接口已加 `@csrf_protect`
 - 响应头包含 `Content-Security-Policy`、`X-Content-Type-Options`、`Referrer-Policy`、`Permissions-Policy`
 - Django 模板默认 autoescape；前端动态渲染完成明细时也会转义文本
+- 登录系统使用 Django 自带 `auth.User`；密码由 Django 保存为安全哈希
+- 邮箱不明文保存，额外写入 `UserProfile.email_sha256`
 
 说明：
 
 - `db.sqlite3` 是 Django 本地开发数据库，已加入 `.gitignore`
-- 当前还没有做用户鉴权，默认使用 `storage/user_bizi`
+- 当前用户鉴权使用 Django 自带 `auth.User`
 - 当前没有引入 Celery，后续任务量变大再考虑队列化
 - 如果需要使用 Django admin / session 等内置表，再执行：
 
@@ -347,22 +368,35 @@ python3 mlflow-app/run_task.py storage/user_bizi/task_titanic_dataset
 
 当前设计是：
 
-- `user_bizi` 下的所有 task 共用一个 `mlruns`
-- 因此只需要启动一个 MLflow UI
+- 每个登录用户有自己的 `storage/user_xxx/mlruns`
+- Django 会为每个用户自动启动或复用一个 MLflow UI
+- Django 可以停止当前用户自己的 MLflow UI
+- 端口从 `MLFLOW_UI_PORT_START` 到 `MLFLOW_UI_PORT_END` 中选择空闲端口
+- 进程元信息写入 `storage/user_xxx/.django_runtime/mlflow_ui.json`
 
-### 打开 user_bizi 的 MLflow 网页
+### 从 Django 打开 MLflow
 
-```bash
-mlflow ui --backend-store-uri file:///Users/bizi/Desktop/GitHub/homemade-datarobot/storage/user_bizi/mlruns --port 5001
-```
-
-网页地址：
+登录 Django 后，进入任意 task 详情页，点击：
 
 ```text
-http://127.0.0.1:5001
+打开 MLflow
 ```
 
-这个页面里会同时看到：
+Django 会先确认当前用户身份，再启动或复用该用户的 MLflow UI，最后跳转到对应本地端口。
+
+当前本地端口池：
+
+```text
+127.0.0.1:5001-5099
+```
+
+`bizi` 用户的 MLflow backend store 是：
+
+```text
+storage/user_bizi/mlruns
+```
+
+这个页面里会看到 `bizi` 用户下的 task，例如：
 
 - `task_iris`
 - `task_titanic_dataset`
@@ -378,6 +412,27 @@ http://127.0.0.1:5001
 - 不再额外创建 `task -> task` 主 run 套娃
 - 不再在 UI 中按 `sklearn.xxx / torch.xxx` 加技术栈前缀
 - experiment 顶层直接展示具体分析项和模型项
+
+---
+
+## Demo 截图
+
+`demo/` 目录保存了当前原型的页面截图，包括 Django 任务页、任务详情、进度状态、Swagger API 文档和 MLflow 展示效果。
+
+![demo 01](demo/Snipaste_2026-07-01_01-03-26.png)
+![demo 02](demo/Snipaste_2026-07-01_01-03-54.png)
+![demo 03](demo/Snipaste_2026-07-01_01-04-04.png)
+![demo 04](demo/Snipaste_2026-07-01_01-09-38.png)
+![demo 05](demo/Snipaste_2026-07-01_01-10-27.png)
+![demo 06](demo/Snipaste_2026-07-01_01-10-43.png)
+![demo 07](demo/Snipaste_2026-07-01_01-10-58.png)
+![demo 08](demo/Snipaste_2026-07-01_01-11-12.png)
+![demo 09](demo/Snipaste_2026-07-01_01-11-35.png)
+![demo 10](demo/Snipaste_2026-07-01_01-11-58.png)
+![demo 11](demo/Snipaste_2026-07-01_01-12-17.png)
+![demo 12](demo/Snipaste_2026-07-01_01-12-27.png)
+![demo 13](demo/Snipaste_2026-07-01_01-12-58.png)
+![demo 14](demo/Snipaste_2026-07-01_01-13-10.png)
 
 ---
 

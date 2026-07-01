@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+
+{% block title %}注册{% endblock %}
+
+{% block content %}
+<div class="auth-panel panel">
+  <h2>注册</h2>
+  <form method="post">
+    {% csrf_token %}
+    {% if form.non_field_errors %}
+      <div class="message">{{ form.non_field_errors }}</div>
+    {% endif %}
+    {% for field in form %}
+      <div style="margin-bottom:16px;">
+        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+        {{ field }}
+        {% if field.name == "email" %}
+          <div class="muted" style="margin-top:6px;">邮箱只保存 SHA256，不明文入库。</div>
+        {% endif %}
+        {% if field.errors %}
+          <div style="margin-top:6px;color:#bf1d2d;">{{ field.errors }}</div>
+        {% endif %}
+      </div>
+    {% endfor %}
+    <button class="primary" type="submit">注册</button>
+  </form>
+</div>
+{% endblock %}
