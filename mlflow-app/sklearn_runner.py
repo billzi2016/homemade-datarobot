@@ -21,10 +21,35 @@ import matplotlib.pyplot as plt
 import numpy as np
 import optuna
 import pandas as pd
+from sklearn.experimental import enable_halving_search_cv  # noqa: F401
 from sklearn.base import clone
 from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import (
+    ExtraTreesClassifier,
+    ExtraTreesRegressor,
+    GradientBoostingClassifier,
+    GradientBoostingRegressor,
+    HistGradientBoostingClassifier,
+    HistGradientBoostingRegressor,
+    RandomForestClassifier,
+    RandomForestRegressor,
+)
 from sklearn.impute import SimpleImputer
-from sklearn.linear_model import LogisticRegression, LinearRegression
+from sklearn.linear_model import (
+    ElasticNet,
+    Lasso,
+    LinearRegression,
+    LogisticRegression,
+    Ridge,
+)
+from sklearn.model_selection import (
+    GridSearchCV,
+    HalvingGridSearchCV,
+    KFold,
+    StratifiedKFold,
+    cross_val_score,
+    train_test_split,
+)
 from sklearn.metrics import (
     accuracy_score,
     classification_report,
@@ -37,9 +62,12 @@ from sklearn.metrics import (
     r2_score,
     roc_auc_score,
 )
-from sklearn.model_selection import train_test_split
+from sklearn.naive_bayes import BernoulliNB, GaussianNB, MultinomialNB
+from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import LabelEncoder, OneHotEncoder, StandardScaler
+from sklearn.preprocessing import LabelEncoder, MinMaxScaler, OneHotEncoder, StandardScaler
+from sklearn.svm import SVC, SVR
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 
 from task_runtime import (
     TaskPaths,
@@ -118,7 +146,10 @@ def infer_feature_columns(config: Dict[str, Any], df: pd.DataFrame) -> Tuple[Lis
 
 
 def build_preprocessor(
-    config: Dict[str, Any], numeric_columns: List[str], categorical_columns: List[str]
+    config: Dict[str, Any],
+    numeric_columns: List[str],
+    categorical_columns: List[str],
+    model_name: str,
 ) -> ColumnTransformer:
     """构造 sklearn 预处理器。"""
 
@@ -128,12 +159,15 @@ def build_preprocessor(
     scaler_name = preprocess_cfg.get("scaler", "standard")
 
     numeric_steps: List[Tuple[str, Any]] = [("imputer", SimpleImputer(strategy=numeric_imputer))]
-    if scaler_name == "standard":
+    nb_models = {"bernoulli_nb", "multinomial_nb"}
+    if model_name in nb_models:
+        numeric_steps.append(("scaler", MinMaxScaler()))
+    elif scaler_name == "standard":
         numeric_steps.append(("scaler", StandardScaler()))
 
     categorical_steps: List[Tuple[str, Any]] = [
         ("imputer", SimpleImputer(strategy=categorical_imputer)),
-        ("onehot", OneHotEncoder(handle_unknown="ignore")),
+        ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
     ]
 
     return ColumnTransformer(
@@ -148,14 +182,24 @@ def build_preprocessor(
 def classification_model_registry(random_seed: int) -> Dict[str, Any]:
     """首版分类模型注册表。"""
 
-    from sklearn.ensemble import RandomForestClassifier
     from xgboost import XGBClassifier
 
-    return {
+    registry: Dict[str, Any] = {
         "logistic_regression": LogisticRegression(max_iter=1000, random_state=random_seed),
+        "svm": SVC(probability=True, random_state=random_seed),
         "random_forest": RandomForestClassifier(
             n_estimators=200, random_state=random_seed, n_jobs=1
         ),
+        "extra_trees": ExtraTreesClassifier(
+            n_estimators=200, random_state=random_seed, n_jobs=1
+        ),
+        "gradient_boosting": GradientBoostingClassifier(random_state=random_seed),
+        "hist_gradient_boosting": HistGradientBoostingClassifier(random_state=random_seed),
+        "decision_tree": DecisionTreeClassifier(random_state=random_seed),
+        "knn": KNeighborsClassifier(),
+        "gaussian_nb": GaussianNB(),
+        "bernoulli_nb": BernoulliNB(),
+        "multinomial_nb": MultinomialNB(),
         "xgboost": XGBClassifier(
             n_estimators=200,
             max_depth=4,
@@ -167,19 +211,41 @@ def classification_model_registry(random_seed: int) -> Dict[str, Any]:
             n_jobs=1,
         ),
     }
+    try:
+        from lightgbm import LGBMClassifier
+
+        registry["lightgbm"] = LGBMClassifier(
+            random_state=random_seed,
+            n_estimators=200,
+            learning_rate=0.05,
+            verbosity=-1,
+        )
+    except Exception:
+        pass
+    return registry
 
 
 def regression_model_registry(random_seed: int) -> Dict[str, Any]:
     """首版回归模型注册表。"""
 
-    from sklearn.ensemble import RandomForestRegressor
     from xgboost import XGBRegressor
 
-    return {
+    registry: Dict[str, Any] = {
         "linear_regression": LinearRegression(),
+        "ridge": Ridge(random_state=random_seed),
+        "lasso": Lasso(random_state=random_seed),
+        "elasticnet": ElasticNet(random_state=random_seed),
+        "svr": SVR(),
         "random_forest": RandomForestRegressor(
             n_estimators=200, random_state=random_seed, n_jobs=1
         ),
+        "extra_trees": ExtraTreesRegressor(
+            n_estimators=200, random_state=random_seed, n_jobs=1
+        ),
+        "gradient_boosting": GradientBoostingRegressor(random_state=random_seed),
+        "hist_gradient_boosting": HistGradientBoostingRegressor(random_state=random_seed),
+        "decision_tree": DecisionTreeRegressor(random_state=random_seed),
+        "knn": KNeighborsRegressor(),
         "xgboost": XGBRegressor(
             n_estimators=200,
             max_depth=4,
@@ -190,6 +256,18 @@ def regression_model_registry(random_seed: int) -> Dict[str, Any]:
             n_jobs=1,
         ),
     }
+    try:
+        from lightgbm import LGBMRegressor
+
+        registry["lightgbm"] = LGBMRegressor(
+            random_state=random_seed,
+            n_estimators=200,
+            learning_rate=0.05,
+            verbosity=-1,
+        )
+    except Exception:
+        pass
+    return registry
 
 
 def build_model_registry(task_type: str, random_seed: int) -> Dict[str, Any]:
@@ -200,6 +278,394 @@ def build_model_registry(task_type: str, random_seed: int) -> Dict[str, Any]:
     if task_type == "regression":
         return regression_model_registry(random_seed)
     raise ValueError(f"不支持的 task_type: {task_type}")
+
+
+def detect_imbalance(y: pd.Series | np.ndarray) -> bool:
+    """
+    判断当前分类标签是否明显不平衡。
+
+    当前规则保持简单可解释：
+    - 如果最小类样本数为 0，直接视为异常不平衡
+    - 否则当最大类 / 最小类 >= 1.5 时，认为值得主动平衡
+    """
+
+    value_counts = pd.Series(y).value_counts()
+    if value_counts.empty:
+        return False
+    min_count = int(value_counts.min())
+    if min_count == 0:
+        return True
+    return float(value_counts.max() / min_count) >= 1.5
+
+
+def oversample_training_data(
+    x_train: pd.DataFrame,
+    y_train: pd.Series,
+    random_seed: int,
+) -> Tuple[pd.DataFrame, pd.Series]:
+    """
+    对训练集做最朴素但最通用的随机过采样。
+
+    这样做的目的很明确：
+    - 不依赖 imbalanced-learn 额外包
+    - 让几乎所有 sklearn 分类模型都能“吃到”平衡后的训练数据
+    - 即便模型本身不支持 class_weight，也能获得统一的类别平衡能力
+    """
+
+    joined = x_train.copy()
+    joined["__target__"] = y_train.values
+    grouped = joined.groupby("__target__", group_keys=False)
+    max_count = int(grouped.size().max())
+    balanced_parts: List[pd.DataFrame] = []
+    for _, group in grouped:
+        replace = len(group) < max_count
+        balanced_parts.append(
+            group.sample(
+                n=max_count,
+                replace=replace,
+                random_state=random_seed,
+            )
+        )
+    balanced_df = (
+        pd.concat(balanced_parts, axis=0)
+        .sample(frac=1.0, random_state=random_seed)
+        .reset_index(drop=True)
+    )
+    y_balanced = balanced_df.pop("__target__")
+    return balanced_df, y_balanced
+
+
+def apply_class_balance_to_model(
+    model_name: str,
+    model: Any,
+    y_train: pd.Series,
+) -> Any:
+    """
+    尽量把类别平衡信息下沉到模型参数层。
+
+    这里不只依赖过采样，还尽可能启用模型原生能力：
+    - 大多数 sklearn 分类器支持 class_weight="balanced"
+    - xgboost 二分类可以设置 scale_pos_weight
+    - lightgbm 支持 class_weight="balanced"
+    """
+
+    if hasattr(model, "get_params"):
+        params = model.get_params()
+        if "class_weight" in params:
+            model.set_params(class_weight="balanced")
+
+    if model_name == "xgboost":
+        class_counts = pd.Series(y_train).value_counts().sort_index()
+        if len(class_counts) == 2:
+            negative = int(class_counts.get(0, class_counts.iloc[0]))
+            positive = int(class_counts.get(1, class_counts.iloc[-1]))
+            if positive > 0:
+                model.set_params(scale_pos_weight=float(negative / positive))
+
+    return model
+
+
+def resolve_search_method(
+    config: Dict[str, Any],
+    model_name: str,
+    task_type: str,
+    n_rows: int,
+    domain: str,
+) -> str:
+    """
+    决定当前模型实际采用的搜索策略。
+
+    设计原则：
+    - 用户若显式指定，就尊重显式指定
+    - 默认 `auto` 不返回 `none`
+    - 高成本模型优先 optuna
+    - 小数据保守走 grid，中等数据走 halving，大数据走 optuna
+    """
+
+    explicit_method = str(config.get("search", {}).get("method", "auto")).lower()
+    if explicit_method in {"grid", "halving_grid", "optuna"}:
+        return explicit_method
+
+    if domain == "torch":
+        return "optuna"
+
+    high_cost_models = {
+        "xgboost",
+        "lightgbm",
+        "svm",
+        "svr",
+    }
+    if model_name in high_cost_models:
+        return "optuna"
+    if n_rows <= 5000:
+        return "grid"
+    if n_rows <= 50000:
+        return "halving_grid"
+    return "optuna"
+
+
+def resolve_scoring(task_type: str) -> str:
+    """给搜索阶段提供一个稳定的默认 scoring。"""
+
+    return "accuracy" if task_type == "classification" else "neg_root_mean_squared_error"
+
+
+def build_cv_splitter(config: Dict[str, Any], task_type: str):
+    """按任务类型构造 CV 切分器。"""
+
+    n_splits = int(config.get("cv", {}).get("n_splits", 3))
+    random_seed = int(config["project"]["random_seed"])
+    if task_type == "classification":
+        return StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_seed)
+    return KFold(n_splits=n_splits, shuffle=True, random_state=random_seed)
+
+
+def build_search_grid(task_type: str, model_name: str) -> Dict[str, List[Any]]:
+    """为常见 sklearn 模型提供一套保守但实用的搜索网格。"""
+
+    grids: Dict[str, Dict[str, List[Any]]] = {
+        "classification": {
+            "logistic_regression": {"C": [0.1, 1.0, 10.0]},
+            "svm": {"C": [0.5, 1.0, 2.0], "gamma": ["scale", "auto"]},
+            "random_forest": {
+                "n_estimators": [120, 200],
+                "max_depth": [None, 6, 12],
+                "min_samples_leaf": [1, 2, 4],
+            },
+            "extra_trees": {
+                "n_estimators": [120, 200],
+                "max_depth": [None, 6, 12],
+                "min_samples_leaf": [1, 2, 4],
+            },
+            "gradient_boosting": {
+                "n_estimators": [100, 180],
+                "learning_rate": [0.03, 0.1],
+                "max_depth": [2, 3],
+            },
+            "hist_gradient_boosting": {
+                "learning_rate": [0.03, 0.1],
+                "max_depth": [None, 6, 12],
+                "max_leaf_nodes": [15, 31],
+            },
+            "decision_tree": {
+                "max_depth": [None, 4, 8, 12],
+                "min_samples_leaf": [1, 2, 4],
+            },
+            "knn": {"n_neighbors": [3, 5, 9], "weights": ["uniform", "distance"]},
+            "gaussian_nb": {"var_smoothing": [1e-9, 1e-8, 1e-7]},
+            "bernoulli_nb": {"alpha": [0.1, 0.5, 1.0]},
+            "multinomial_nb": {"alpha": [0.1, 0.5, 1.0]},
+            "xgboost": {
+                "n_estimators": [120, 220],
+                "max_depth": [3, 5, 7],
+                "learning_rate": [0.03, 0.1],
+            },
+            "lightgbm": {
+                "n_estimators": [120, 220],
+                "num_leaves": [15, 31, 63],
+                "learning_rate": [0.03, 0.1],
+            },
+        },
+        "regression": {
+            "linear_regression": {},
+            "ridge": {"alpha": [0.1, 1.0, 10.0]},
+            "lasso": {"alpha": [0.001, 0.01, 0.1]},
+            "elasticnet": {"alpha": [0.001, 0.01, 0.1], "l1_ratio": [0.2, 0.5, 0.8]},
+            "svr": {"C": [0.5, 1.0, 2.0], "gamma": ["scale", "auto"]},
+            "random_forest": {
+                "n_estimators": [120, 200],
+                "max_depth": [None, 6, 12],
+                "min_samples_leaf": [1, 2, 4],
+            },
+            "extra_trees": {
+                "n_estimators": [120, 200],
+                "max_depth": [None, 6, 12],
+                "min_samples_leaf": [1, 2, 4],
+            },
+            "gradient_boosting": {
+                "n_estimators": [100, 180],
+                "learning_rate": [0.03, 0.1],
+                "max_depth": [2, 3],
+            },
+            "hist_gradient_boosting": {
+                "learning_rate": [0.03, 0.1],
+                "max_depth": [None, 6, 12],
+                "max_leaf_nodes": [15, 31],
+            },
+            "decision_tree": {
+                "max_depth": [None, 4, 8, 12],
+                "min_samples_leaf": [1, 2, 4],
+            },
+            "knn": {"n_neighbors": [3, 5, 9], "weights": ["uniform", "distance"]},
+            "xgboost": {
+                "n_estimators": [120, 220],
+                "max_depth": [3, 5, 7],
+                "learning_rate": [0.03, 0.1],
+            },
+            "lightgbm": {
+                "n_estimators": [120, 220],
+                "num_leaves": [15, 31, 63],
+                "learning_rate": [0.03, 0.1],
+            },
+        },
+    }
+    return grids.get(task_type, {}).get(model_name, {})
+
+
+def suggest_model_params(trial: optuna.Trial, task_type: str, model_name: str) -> Dict[str, Any]:
+    """为 Optuna 提供各模型的参数空间。"""
+
+    if model_name == "logistic_regression":
+        return {"C": trial.suggest_float("C", 1e-2, 10.0, log=True)}
+    if model_name in {"svm", "svr"}:
+        return {
+            "C": trial.suggest_float("C", 0.1, 10.0, log=True),
+            "gamma": trial.suggest_categorical("gamma", ["scale", "auto"]),
+        }
+    if model_name in {"random_forest", "extra_trees"}:
+        return {
+            "n_estimators": trial.suggest_int("n_estimators", 80, 260, step=20),
+            "max_depth": trial.suggest_categorical("max_depth", [None, 4, 8, 12, 16]),
+            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 6),
+        }
+    if model_name in {"gradient_boosting", "hist_gradient_boosting"}:
+        return {
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
+            "max_depth": trial.suggest_categorical("max_depth", [None, 3, 6, 10]),
+            "max_leaf_nodes": trial.suggest_categorical("max_leaf_nodes", [15, 31, 63]),
+        } if model_name == "hist_gradient_boosting" else {
+            "n_estimators": trial.suggest_int("n_estimators", 80, 220, step=20),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
+            "max_depth": trial.suggest_int("max_depth", 2, 5),
+        }
+    if model_name == "decision_tree":
+        return {
+            "max_depth": trial.suggest_categorical("max_depth", [None, 4, 8, 12, 16]),
+            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 6),
+        }
+    if model_name == "knn":
+        return {
+            "n_neighbors": trial.suggest_int("n_neighbors", 3, 15, step=2),
+            "weights": trial.suggest_categorical("weights", ["uniform", "distance"]),
+        }
+    if model_name == "gaussian_nb":
+        return {"var_smoothing": trial.suggest_float("var_smoothing", 1e-10, 1e-7, log=True)}
+    if model_name in {"bernoulli_nb", "multinomial_nb"}:
+        return {"alpha": trial.suggest_float("alpha", 1e-2, 2.0, log=True)}
+    if model_name == "xgboost":
+        return {
+            "n_estimators": trial.suggest_int("n_estimators", 80, 260, step=20),
+            "max_depth": trial.suggest_int("max_depth", 3, 8),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
+            "subsample": trial.suggest_float("subsample", 0.7, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.7, 1.0),
+            "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
+        }
+    if model_name == "lightgbm":
+        return {
+            "n_estimators": trial.suggest_int("n_estimators", 80, 260, step=20),
+            "num_leaves": trial.suggest_int("num_leaves", 15, 127, step=8),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
+            "min_child_samples": trial.suggest_int("min_child_samples", 5, 30),
+        }
+    if model_name == "ridge":
+        return {"alpha": trial.suggest_float("alpha", 1e-2, 10.0, log=True)}
+    if model_name == "lasso":
+        return {"alpha": trial.suggest_float("alpha", 1e-4, 1.0, log=True)}
+    if model_name == "elasticnet":
+        return {
+            "alpha": trial.suggest_float("alpha", 1e-4, 1.0, log=True),
+            "l1_ratio": trial.suggest_float("l1_ratio", 0.1, 0.9),
+        }
+    return {}
+
+
+def run_search_for_pipeline(
+    config: Dict[str, Any],
+    task_type: str,
+    model_name: str,
+    pipeline: Pipeline,
+    x_train: pd.DataFrame,
+    y_train: pd.Series,
+    search_method: str,
+) -> Tuple[Pipeline, Dict[str, Any]]:
+    """统一执行 sklearn 搜索。"""
+
+    scoring = resolve_scoring(task_type)
+    cv_splitter = build_cv_splitter(config, task_type)
+
+    if search_method == "grid":
+        raw_grid = build_search_grid(task_type, model_name)
+        search_grid = {f"model__{key}": value for key, value in raw_grid.items()}
+        if not search_grid:
+            pipeline.fit(x_train, y_train)
+            return pipeline, {"search_method": "grid", "search_note": "empty_grid_direct_fit"}
+        searcher = GridSearchCV(
+            estimator=pipeline,
+            param_grid=search_grid,
+            scoring=scoring,
+            cv=cv_splitter,
+            n_jobs=1,
+        )
+        searcher.fit(x_train, y_train)
+        return searcher.best_estimator_, {
+            "search_method": "grid",
+            "best_params": searcher.best_params_,
+            "best_score": float(searcher.best_score_),
+        }
+
+    if search_method == "halving_grid":
+        raw_grid = build_search_grid(task_type, model_name)
+        search_grid = {f"model__{key}": value for key, value in raw_grid.items()}
+        if not search_grid:
+            pipeline.fit(x_train, y_train)
+            return pipeline, {"search_method": "halving_grid", "search_note": "empty_grid_direct_fit"}
+        searcher = HalvingGridSearchCV(
+            estimator=pipeline,
+            param_grid=search_grid,
+            scoring=scoring,
+            cv=cv_splitter,
+            n_jobs=1,
+            factor=2,
+        )
+        searcher.fit(x_train, y_train)
+        return searcher.best_estimator_, {
+            "search_method": "halving_grid",
+            "best_params": searcher.best_params_,
+            "best_score": float(searcher.best_score_),
+        }
+
+    n_trials = int(config.get("search", {}).get("n_trials", 12))
+    direction = "maximize"
+
+    def objective(trial: optuna.Trial) -> float:
+        params = suggest_model_params(trial, task_type, model_name)
+        candidate = clone(pipeline)
+        if params:
+            candidate.set_params(**{f"model__{key}": value for key, value in params.items()})
+        scores = cross_val_score(
+            candidate,
+            x_train,
+            y_train,
+            cv=cv_splitter,
+            scoring=scoring,
+            n_jobs=1,
+        )
+        return float(np.mean(scores))
+
+    study = optuna.create_study(direction=direction)
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    best_pipeline = clone(pipeline)
+    best_params = suggest_model_params(study.best_trial, task_type, model_name)
+    if best_params:
+        best_pipeline.set_params(**{f"model__{key}": value for key, value in best_params.items()})
+    best_pipeline.fit(x_train, y_train)
+    return best_pipeline, {
+        "search_method": "optuna",
+        "best_params": best_params,
+        "best_score": float(study.best_value),
+        "n_trials": n_trials,
+    }
 
 
 def build_xgboost_from_params(
@@ -349,11 +815,19 @@ def run_sklearn(
         df[target_column] = label_encoder.fit_transform(df[target_column].astype(str))
 
     x_train, x_test, y_train, y_test = split_data(config, df, feature_columns, target_column)
-    preprocessor = build_preprocessor(config, numeric_columns, categorical_columns)
     registry = build_model_registry(task_type, random_seed)
 
     configured_models = config["models"]["sklearn"][task_type]
     summary_rows: List[Dict[str, Any]] = []
+    imbalance_cfg = config.get("imbalance", {})
+    imbalance_enabled = bool(imbalance_cfg.get("enabled", task_type == "classification"))
+
+    if task_type == "classification" and imbalance_enabled and detect_imbalance(y_train):
+        x_train, y_train = oversample_training_data(
+            x_train=x_train,
+            y_train=y_train,
+            random_seed=random_seed,
+        )
 
     for model_name in configured_models:
         if model_name not in registry or is_experiment_completed(state, "sklearn", model_name):
@@ -363,29 +837,26 @@ def run_sklearn(
         save_run_state(paths, state)
 
         model_instance = clone(registry[model_name])
-        optuna_result: Dict[str, Any] = {}
-        use_optuna = (
-            config.get("search", {}).get("method") == "optuna"
-            and model_name == "xgboost"
-            and config.get("search", {}).get("sklearn", {}).get("xgboost", {}).get("enabled", False)
+        if task_type == "classification" and imbalance_enabled:
+            model_instance = apply_class_balance_to_model(
+                model_name=model_name,
+                model=model_instance,
+                y_train=y_train,
+            )
+        search_method = resolve_search_method(
+            config=config,
+            model_name=model_name,
+            task_type=task_type,
+            n_rows=len(df),
+            domain="sklearn",
         )
 
-        if use_optuna:
-            optuna_result = tune_xgboost_with_optuna(
-                config=config,
-                task_type=task_type,
-                random_seed=random_seed,
-                preprocessor=preprocessor,
-                x_train=x_train,
-                y_train=y_train,
-                x_valid=x_test,
-                y_valid=y_test,
-            )
-            model_instance = build_xgboost_from_params(
-                task_type=task_type,
-                random_seed=random_seed,
-                params=optuna_result["best_params"],
-            )
+        preprocessor = build_preprocessor(
+            config=config,
+            numeric_columns=numeric_columns,
+            categorical_columns=categorical_columns,
+            model_name=model_name,
+        )
 
         pipeline = Pipeline(
             steps=[
@@ -395,16 +866,34 @@ def run_sklearn(
         )
 
         with mlflow.start_run(run_name=f"sklearn.{model_name}", nested=True):
-            if optuna_result:
-                mlflow.log_param("search_method", "optuna")
-                mlflow.log_param("optuna_n_trials", optuna_result["n_trials"])
-                for key, value in optuna_result["best_params"].items():
+            trained_pipeline, search_info = run_search_for_pipeline(
+                config=config,
+                task_type=task_type,
+                model_name=model_name,
+                pipeline=pipeline,
+                x_train=x_train,
+                y_train=y_train,
+                search_method=search_method,
+            )
+            mlflow.log_param("search_method", search_info["search_method"])
+            mlflow.log_param("imbalance_enabled", imbalance_enabled)
+            mlflow.log_param("stratify_enabled", bool(config["data"].get("stratify", True)))
+            if "n_trials" in search_info:
+                mlflow.log_param("optuna_n_trials", search_info["n_trials"])
+            if "best_params" in search_info:
+                for key, value in search_info["best_params"].items():
                     mlflow.log_param(f"best_{key}", value)
-                mlflow.log_metric("optuna_best_value", optuna_result["best_value"])
+            if "best_score" in search_info:
+                mlflow.log_metric("search_best_score", search_info["best_score"])
+            if "search_note" in search_info:
+                mlflow.log_param("search_note", search_info["search_note"])
 
-            pipeline.fit(x_train, y_train)
-            y_pred = pipeline.predict(x_test)
-            y_prob = pipeline.predict_proba(x_test) if hasattr(pipeline, "predict_proba") else None
+            y_pred = trained_pipeline.predict(x_test)
+            y_prob = (
+                trained_pipeline.predict_proba(x_test)
+                if hasattr(trained_pipeline, "predict_proba")
+                else None
+            )
 
             metrics = compute_metrics(task_type, y_test.to_numpy(), y_pred, y_prob)
             for metric_name, metric_value in metrics.items():

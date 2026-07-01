@@ -14,7 +14,7 @@
 
 需要特别强调的是：本 PRD 只描述 `MLflow` 以及它下面真正干活的所有实验模块，包括分析实验、降维实验、`sklearn` 实验、`torch` 实验，不再把 Django 业务层混在同一份文档里。
 
-本项目后续采用 `storage/user_bizi/tasks/task_iris` 这种目录作为最小任务管理单元。每个任务目录必须自带该任务自己的配置、数据、结果与 artifact，不能和其他任务混放。
+本项目后续采用 `storage/user_bizi/task_iris` 这种目录作为最小任务管理单元。每个任务目录必须自带该任务自己的配置、数据、结果与 artifact，不能和其他任务混放。
 
 ---
 
@@ -123,6 +123,45 @@
 - 函数职责、关键分支、长逻辑链、容易误解的实现点必须写详细中文注释
 - 不只写“做了什么”，还要写“为什么这么做”
 
+### 3.5 搜索策略默认规则
+
+搜索策略的默认值必须为 `auto`，并且 `auto` 不允许退化成 `none`。也就是说，系统首版允许的搜索方式包括：
+
+- `grid`
+- `halving_grid`
+- `optuna`
+- `auto`
+
+其中：
+
+- `auto` 是默认值
+- `none` 只允许作为极端人工覆盖，不允许作为默认链路
+
+`auto` 的首版规则定义如下：
+
+- `torch` 模型默认优先 `optuna`
+- `xgboost / lightgbm / svm / svr` 这类高成本或高收益模型默认优先 `optuna`
+- 小数据集优先 `grid`
+- 中等数据集优先 `halving_grid`
+- 更大数据集优先 `optuna`
+
+系统必须把“最终实际采用的搜索方式”以及“选择原因”记录到 `MLflow` 参数中，避免后续排查时无法判断系统为什么这样选。
+
+### 3.6 分类任务默认平衡
+
+分类任务必须默认启用两层平衡：
+
+1. 分层切分
+   - `train_test_split(..., stratify=y)`
+   - 目的：保证训练集与测试集的类别比例尽量一致
+
+2. 训练阶段平衡
+   - 对支持的模型启用原生类别权重，例如 `class_weight="balanced"`
+   - 对不支持原生类别权重的模型，统一通过训练集随机过采样补足
+   - 对 `torch` 模型，额外在 loss 层引入类别权重
+
+首版系统的目标不是“少数模型支持平衡”，而是“分类任务下尽量让每个模型都吃到类别平衡机制”。
+
 ---
 
 ## 4. 目标用户与使用场景
@@ -136,7 +175,7 @@
 
 ### 4.2 典型使用流程
 
-1. 用户通过 Django 创建一个新的任务单元，例如 `storage/user_bizi/tasks/task_iris`。
+1. 用户通过 Django 创建一个新的任务单元，例如 `storage/user_bizi/task_iris`。
 2. 用户通过 Django 上传数据，或直接将数据放入该实验目录下的 `data/`。
 3. 用户在该实验目录下的 `config.yaml` 中指定数据路径、目标列、任务类型、CV、模型清单等参数。
 4. 系统按配置自动执行：
@@ -161,27 +200,27 @@
 homemade-datarobot/
 ├── storage/
 │   └── user_bizi/
-│       └── tasks/
-│           ├── task_iris/
-│           │   ├── config.yaml
-│           │   ├── data/
-│           │   │   ├── raw/
-│           │   │   ├── processed/
-│           │   │   └── splits/
-│           │   ├── outputs/
-│           │   │   ├── predictions/
-│           │   │   ├── metrics/
-│           │   │   └── models/
-│           │   ├── artifacts/
-│           │   ├── checkpoints/
-│           │   └── run_state.json
-│           └── task_titanic_dataset/
-│               ├── config.yaml
-│               ├── data/
-│               ├── outputs/
-│               ├── artifacts/
-│               ├── checkpoints/
-│               └── run_state.json
+│       ├── mlruns/
+│       ├── task_iris/
+│       │   ├── config.yaml
+│       │   ├── data/
+│       │   │   ├── raw/
+│       │   │   ├── processed/
+│       │   │   └── splits/
+│       │   ├── outputs/
+│       │   │   ├── predictions/
+│       │   │   ├── metrics/
+│       │   │   └── models/
+│       │   ├── artifacts/
+│       │   ├── checkpoints/
+│       │   └── run_state.json
+│       └── task_titanic_dataset/
+│           ├── config.yaml
+│           ├── data/
+│           ├── outputs/
+│           ├── artifacts/
+│           ├── checkpoints/
+│           └── run_state.json
 └── mlflow-app/
     ├── sklearn/
     ├── torch/
@@ -192,25 +231,25 @@ homemade-datarobot/
 
 ### 5.1 顶层目录说明
 
-- `storage/user_bizi/tasks/task_iris/config.yaml`
+- `storage/user_bizi/task_iris/config.yaml`
   - 单个任务的主配置文件。
   - Django 与 MLflow 实验子系统共享。
   - 一个任务一份，不同任务之间不能混用。
 
-- `storage/user_bizi/tasks/task_iris/data/`
+- `storage/user_bizi/task_iris/data/`
   - 单个任务的数据目录。
   - 包括原始数据、训练集、验证集、测试集、处理后的数据、中间缓存数据等。
   - 数据必须和所属任务绑定。
 
-- `storage/user_bizi/tasks/task_iris/outputs/`
+- `storage/user_bizi/task_iris/outputs/`
   - 单个任务的输出目录。
   - 放预测结果、评估汇总、模型文件、图表等最终产物。
 
-- `storage/user_bizi/tasks/task_iris/run_state.json`
+- `storage/user_bizi/task_iris/run_state.json`
   - 单个任务的可读状态文件。
   - 用于记录当前状态、已完成步骤、已完成模型、待执行步骤、恢复信息。
 
-- `storage/user_bizi/tasks/task_iris/checkpoints/`
+- `storage/user_bizi/task_iris/checkpoints/`
   - 单个任务的保存点目录。
   - 用于中断恢复，尤其是 `torch` 训练恢复。
 

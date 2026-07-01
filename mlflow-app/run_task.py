@@ -11,6 +11,8 @@ task 运行入口。
 2. 一个 task 对应一个主 MLflow run；analysis / sklearn 各子项用 nested run 记录。
 3. run_state.json 以“人类可读”为第一优先级，因此会明确记录已完成实验列表。
 4. 为了控制写盘量，模型类只保留必要最终产物；analysis 类完整保留 2D 结果。
+5. 搜索策略默认走 auto，不允许把默认路径退化为 none。
+6. 分类任务默认分层切分，并尽量对每个模型启用类别平衡。
 """
 
 from __future__ import annotations

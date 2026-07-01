@@ -35,7 +35,7 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-from sklearn_runner import infer_feature_columns
+from sklearn_runner import detect_imbalance, infer_feature_columns, resolve_search_method
 from task_runtime import (
     TaskPaths,
     is_experiment_completed,
@@ -152,6 +152,26 @@ def split_tensor_data(
         stratify=stratify,
     )
     return x_train, x_test, y_train, y_test
+
+
+def oversample_numpy_training_data(
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    random_seed: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """对 torch 训练数据执行与 sklearn 一致的随机过采样。"""
+
+    rng = np.random.default_rng(random_seed)
+    classes, counts = np.unique(y_train, return_counts=True)
+    max_count = int(counts.max())
+    sampled_indices: List[np.ndarray] = []
+    for class_value, count in zip(classes, counts):
+        class_indices = np.where(y_train == class_value)[0]
+        extra_indices = rng.choice(class_indices, size=max_count, replace=True)
+        sampled_indices.append(extra_indices)
+    final_indices = np.concatenate(sampled_indices)
+    rng.shuffle(final_indices)
+    return x_train[final_indices], y_train[final_indices]
 
 
 class TabularMLP(nn.Module):
@@ -296,6 +316,92 @@ def tune_mlp_with_optuna(
     }
 
 
+def tune_torch_model_with_optuna(
+    model_name: str,
+    config: Dict[str, Any],
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_valid: np.ndarray,
+    y_valid: np.ndarray,
+    task_type: str,
+) -> Dict[str, Any]:
+    """
+    为 torch 分类/回归模型统一提供 Optuna 搜索入口。
+
+    当前实现策略：
+    - `mlp` 搜 hidden_dims / dropout / lr / batch_size
+    - `cnn1d` 搜 lr / batch_size
+    - `tabnet` 搜 n_d / n_steps / gamma / lr / batch_size
+    """
+
+    if model_name == "mlp":
+        return tune_mlp_with_optuna(config, x_train, y_train, x_valid, y_valid, task_type)
+
+    n_trials = int(config.get("search", {}).get("n_trials", 12))
+    random_seed = int(config["project"]["random_seed"])
+    output_dim = len(np.unique(y_train)) if task_type == "classification" else 1
+
+    def objective(trial: optuna.Trial) -> float:
+        torch.manual_seed(random_seed)
+        learning_rate = trial.suggest_float("learning_rate", 1e-4, 5e-3, log=True)
+        batch_size = trial.suggest_categorical("batch_size", [16, 32, 64, 128])
+
+        if model_name == "cnn1d":
+            model = TabularCNN1D(input_dim=x_train.shape[1], output_dim=output_dim)
+            training_cfg = {"learning_rate": learning_rate, "batch_size": batch_size, "epochs": 12}
+            result = train_standard_torch_model(
+                model_name=model_name,
+                model=model,
+                x_train=x_train,
+                y_train=y_train,
+                x_test=x_valid,
+                y_test=y_valid,
+                task_type=task_type,
+                paths=TaskPaths.__new__(TaskPaths),
+                state={},
+                config={"training": {"torch": training_cfg}},
+            )
+            return float(result["metrics"]["accuracy"] if task_type == "classification" else -result["metrics"]["rmse"])
+
+        if model_name == "tabnet":
+            from pytorch_tabnet.tab_model import TabNetClassifier, TabNetRegressor  # type: ignore
+
+            tabnet_params = {
+                "n_d": trial.suggest_int("n_d", 8, 32, step=8),
+                "n_a": trial.suggest_int("n_a", 8, 32, step=8),
+                "n_steps": trial.suggest_int("n_steps", 3, 7),
+                "gamma": trial.suggest_float("gamma", 1.0, 1.8),
+                "seed": random_seed,
+            }
+            model_cls = TabNetClassifier if task_type == "classification" else TabNetRegressor
+            model = model_cls(**tabnet_params)
+            fit_kwargs: Dict[str, Any] = {
+                "X_train": x_train,
+                "y_train": y_train.reshape(-1, 1) if task_type == "regression" else y_train,
+                "eval_set": [(x_valid, y_valid.reshape(-1, 1) if task_type == "regression" else y_valid)],
+                "max_epochs": 30,
+                "patience": 5,
+                "batch_size": batch_size,
+                "virtual_batch_size": min(batch_size, 32),
+            }
+            model.fit(**fit_kwargs)
+            if task_type == "classification":
+                y_pred = model.predict(x_valid)
+                return float(accuracy_score(y_valid, y_pred))
+            y_pred = model.predict(x_valid).reshape(-1)
+            return -float(np.sqrt(mean_squared_error(y_valid, y_pred)))
+
+        raise ValueError(f"不支持的 torch Optuna 模型: {model_name}")
+
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    return {
+        "best_params": study.best_params,
+        "best_value": float(study.best_value),
+        "n_trials": n_trials,
+    }
+
+
 def compute_torch_metrics(
     task_type: str, y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.ndarray | None = None
 ) -> Dict[str, float]:
@@ -349,7 +455,14 @@ def train_standard_torch_model(
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     if task_type == "classification":
-        loss_fn = nn.CrossEntropyLoss()
+        class_weights = None
+        if config.get("imbalance", {}).get("enabled", True):
+            class_counts = np.bincount(y_train)
+            class_weights = class_counts.sum() / np.maximum(class_counts, 1)
+            class_weights = class_weights / class_weights.sum() * len(class_weights)
+        loss_fn = nn.CrossEntropyLoss(
+            weight=None if class_weights is None else torch.tensor(class_weights, dtype=torch.float32)
+        )
         y_train_tensor = torch.tensor(y_train, dtype=torch.long)
         y_test_tensor = torch.tensor(y_test, dtype=torch.long)
     else:
@@ -394,8 +507,9 @@ def train_standard_torch_model(
             best_loss = valid_loss
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             no_improve_epochs = 0
-            checkpoint_path = paths.checkpoints_dir / f"{model_name}_best.pt"
-            torch.save(best_state, checkpoint_path)
+            if hasattr(paths, "checkpoints_dir"):
+                checkpoint_path = paths.checkpoints_dir / f"{model_name}_best.pt"
+                torch.save(best_state, checkpoint_path)
         else:
             no_improve_epochs += 1
             if no_improve_epochs >= patience:
@@ -419,8 +533,10 @@ def train_standard_torch_model(
     for metric_name, metric_value in metrics.items():
         mlflow.log_metric(metric_name, metric_value)
 
-    torch.save(model.state_dict(), paths.models_dir / f"{model_name}_final.pt")
-    save_loss_curve(train_loss_history, valid_loss_history, model_name, paths)
+    if hasattr(paths, "models_dir"):
+        torch.save(model.state_dict(), paths.models_dir / f"{model_name}_final.pt")
+    if hasattr(paths, "plots_dir"):
+        save_loss_curve(train_loss_history, valid_loss_history, model_name, paths)
     return {
         "y_pred": y_pred,
         "y_prob": y_prob,
@@ -457,6 +573,14 @@ def run_torch(
 
     x_train, x_test, y_train, y_test = split_tensor_data(config, x_df, y)
     summary_rows: List[Dict[str, Any]] = []
+    imbalance_cfg = config.get("imbalance", {})
+    imbalance_enabled = bool(imbalance_cfg.get("enabled", task_type == "classification"))
+    if task_type == "classification" and imbalance_enabled and detect_imbalance(y_train):
+        x_train, y_train = oversample_numpy_training_data(
+            x_train=x_train,
+            y_train=y_train,
+            random_seed=int(config["project"]["random_seed"]),
+        )
 
     for model_name in configured_models:
         if is_experiment_completed(state, "torch", model_name):
@@ -466,24 +590,21 @@ def run_torch(
         save_run_state(paths, state)
 
         with mlflow.start_run(run_name=f"torch.{model_name}", nested=True):
-            if model_name == "tabnet":
-                try:
-                    import pytorch_tabnet  # noqa: F401
-                except Exception as exc:
-                    mlflow.log_param("skipped_reason", f"tabnet_unavailable: {exc}")
-                    continue
-                mlflow.log_param("skipped_reason", "tabnet_real_training_not_implemented_yet")
-                continue
-
             training_cfg = dict(config.get("training", {}).get("torch", {}))
-            use_optuna = (
-                config.get("search", {}).get("method") == "optuna"
-                and model_name == "mlp"
-                and config.get("search", {}).get("torch", {}).get("mlp", {}).get("enabled", False)
+            search_method = resolve_search_method(
+                config=config,
+                model_name=model_name,
+                task_type=task_type,
+                n_rows=len(df),
+                domain="torch",
             )
+            mlflow.log_param("search_method", search_method)
+            mlflow.log_param("imbalance_enabled", imbalance_enabled)
+            mlflow.log_param("stratify_enabled", bool(config["data"].get("stratify", True)))
 
-            if use_optuna:
-                optuna_result = tune_mlp_with_optuna(
+            if search_method == "optuna":
+                optuna_result = tune_torch_model_with_optuna(
+                    model_name=model_name,
                     config=config,
                     x_train=x_train,
                     y_train=y_train,
@@ -491,37 +612,73 @@ def run_torch(
                     y_valid=y_test,
                     task_type=task_type,
                 )
-                training_cfg["hidden_dims"] = [
-                    optuna_result["best_params"]["hidden_dim_1"],
-                    optuna_result["best_params"]["hidden_dim_2"],
-                ]
-                training_cfg["dropout"] = optuna_result["best_params"]["dropout"]
-                training_cfg["learning_rate"] = optuna_result["best_params"]["learning_rate"]
-                training_cfg["batch_size"] = optuna_result["best_params"]["batch_size"]
-                mlflow.log_param("search_method", "optuna")
+                if model_name == "mlp":
+                    training_cfg["hidden_dims"] = [
+                        optuna_result["best_params"]["hidden_dim_1"],
+                        optuna_result["best_params"]["hidden_dim_2"],
+                    ]
+                    training_cfg["dropout"] = optuna_result["best_params"]["dropout"]
+                if "learning_rate" in optuna_result["best_params"]:
+                    training_cfg["learning_rate"] = optuna_result["best_params"]["learning_rate"]
+                if "batch_size" in optuna_result["best_params"]:
+                    training_cfg["batch_size"] = optuna_result["best_params"]["batch_size"]
                 mlflow.log_param("optuna_n_trials", optuna_result["n_trials"])
                 for key, value in optuna_result["best_params"].items():
                     mlflow.log_param(f"best_{key}", value)
                 mlflow.log_metric("optuna_best_value", optuna_result["best_value"])
 
-            model = build_torch_model(
-                model_name,
-                input_dim=x_train.shape[1],
-                output_dim=output_dim,
-                training_cfg=training_cfg,
-            )
-            result = train_standard_torch_model(
-                model_name=model_name,
-                model=model,
-                x_train=x_train,
-                y_train=y_train,
-                x_test=x_test,
-                y_test=y_test,
-                task_type=task_type,
-                paths=paths,
-                state=state,
-                config={**config, "training": {"torch": training_cfg}},
-            )
+            if model_name == "tabnet":
+                from pytorch_tabnet.tab_model import TabNetClassifier, TabNetRegressor  # type: ignore
+
+                tabnet_params = {
+                    "seed": int(config["project"]["random_seed"]),
+                    "verbose": 0,
+                }
+                for key in ("n_d", "n_a", "n_steps", "gamma"):
+                    if key in training_cfg:
+                        tabnet_params[key] = training_cfg[key]
+                    elif key in optuna_result.get("best_params", {}):
+                        tabnet_params[key] = optuna_result["best_params"][key]
+                model_cls = TabNetClassifier if task_type == "classification" else TabNetRegressor
+                model = model_cls(**tabnet_params)
+                model.fit(
+                    x_train,
+                    y_train if task_type == "classification" else y_train.reshape(-1, 1),
+                    eval_set=[(x_test, y_test if task_type == "classification" else y_test.reshape(-1, 1))],
+                    max_epochs=int(training_cfg.get("epochs", 30)),
+                    patience=int(training_cfg.get("early_stopping", {}).get("patience", 5)),
+                    batch_size=int(training_cfg.get("batch_size", 64)),
+                    virtual_batch_size=min(int(training_cfg.get("batch_size", 64)), 32),
+                )
+                if task_type == "classification":
+                    y_pred = model.predict(x_test)
+                    y_prob = model.predict_proba(x_test)
+                else:
+                    y_pred = model.predict(x_test).reshape(-1)
+                    y_prob = None
+                metrics = compute_torch_metrics(task_type, y_test, y_pred, y_prob)
+                for metric_name, metric_value in metrics.items():
+                    mlflow.log_metric(metric_name, metric_value)
+                result = {"y_pred": y_pred, "y_prob": y_prob, "metrics": metrics}
+            else:
+                model = build_torch_model(
+                    model_name,
+                    input_dim=x_train.shape[1],
+                    output_dim=output_dim,
+                    training_cfg=training_cfg,
+                )
+                result = train_standard_torch_model(
+                    model_name=model_name,
+                    model=model,
+                    x_train=x_train,
+                    y_train=y_train,
+                    x_test=x_test,
+                    y_test=y_test,
+                    task_type=task_type,
+                    paths=paths,
+                    state=state,
+                    config={**config, "training": {"torch": training_cfg}},
+                )
 
             prediction_df = pd.DataFrame({"y_true": y_test, "y_pred": result["y_pred"]})
             prediction_path = paths.predictions_dir / f"torch_{model_name}_predictions.csv"
@@ -540,10 +697,11 @@ def run_torch(
             )
             mlflow.log_artifact(str(metrics_path), artifact_path="metrics")
 
-            mlflow.log_artifact(
-                str(paths.plots_dir / f"torch_{model_name}_loss_curve.png"),
-                artifact_path="plots",
-            )
+            if model_name != "tabnet":
+                mlflow.log_artifact(
+                    str(paths.plots_dir / f"torch_{model_name}_loss_curve.png"),
+                    artifact_path="plots",
+                )
             if task_type == "classification":
                 save_torch_classification_plots(
                     y_true=y_test,
