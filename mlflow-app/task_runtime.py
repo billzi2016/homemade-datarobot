@@ -48,6 +48,7 @@ def build_task_paths(task_dir: Path) -> TaskPaths:
     """按照 PRD 里约定的目录结构，构造当前 task 运行所需的全部路径。"""
 
     outputs_dir = task_dir / "outputs"
+    shared_runtime_cache_dir = task_dir.parent / ".runtime_cache"
     return TaskPaths(
         task_dir=task_dir,
         config_path=task_dir / "config.yaml",
@@ -63,7 +64,10 @@ def build_task_paths(task_dir: Path) -> TaskPaths:
         analysis_dir=outputs_dir / "analysis",
         mlruns_dir=task_dir / "mlruns",
         mpl_config_dir=task_dir / ".mplconfig",
-        numba_cache_dir=task_dir / ".numba_cache",
+        # numba/umap 缓存不再直接塞进 task 目录，避免 task 目录被大量编译缓存污染。
+        # 这里仍然按 task_name 分子目录，原因是不同 task 的运行环境与依赖版本可能不同，
+        # 完全共用一个平铺缓存目录更容易出现缓存相互覆盖、排查困难的问题。
+        numba_cache_dir=shared_runtime_cache_dir / "numba" / task_dir.name,
         tmp_dir=task_dir / ".tmp",
     )
 

@@ -1,15 +1,11 @@
 """
 analysis 执行模块。
 
-当前首版负责：
-- PCA
-- t-SNE
-- UMAP（环境可用时）
-
-设计要求：
-- analysis 类结果完整保留 2D 坐标结果
-- analysis 类步骤直接作为 experiment 顶层 run 记录
-- 完成状态同步写入 run_state.json
+当前模块只负责真正的数据降维与结果落盘，不再直接创建 MLflow run。
+这样做的原因很明确：
+1. pca / tsne / umap 不应该混进模型排行榜主列表；
+2. 它们更适合作为一个统一的 data_visualization 汇总 run 的 artifacts；
+3. 但 analysis 原始 2D 结果和散点图仍然必须完整保留。
 """
 
 from __future__ import annotations
@@ -68,7 +64,7 @@ def run_analysis(
     feature_df: pd.DataFrame,
     paths: TaskPaths,
     state: Dict[str, Any],
-) -> None:
+) -> Dict[str, Any]:
     """
     执行 analysis 类实验。
 
@@ -80,7 +76,7 @@ def run_analysis(
 
     analysis_cfg = config.get("analysis", {})
     if not analysis_cfg.get("enabled", True):
-        return
+        return {}
 
     # analysis 需要数值化输入，因此这里保守地只对原始特征做 one-hot，再做标准化。
     analysis_input = pd.get_dummies(feature_df, dummy_na=True)
@@ -93,6 +89,8 @@ def run_analysis(
         ("umap", analysis_cfg.get("umap", {}).get("enabled", True)),
     ]
 
+    visualization_rows: List[Dict[str, Any]] = []
+
     for name, enabled in analysis_jobs:
         if not enabled or is_experiment_completed(state, "analysis", name):
             continue
@@ -100,72 +98,69 @@ def run_analysis(
         state["current_stage"] = f"analysis.{name}"
         save_run_state(paths, state)
 
-        with mlflow.start_run(run_name=name):
-            mlflow.set_tag("task_id", config["task"]["task_id"])
-            mlflow.set_tag("run_level", "item")
-            mlflow.set_tag("item_name", name)
-            mlflow.set_tag("item_kind", "analysis")
-            mlflow.log_param("sample_count", int(len(feature_df)))
-            mlflow.log_param("feature_count", int(feature_df.shape[1]))
-            mlflow.log_param("analysis_input_feature_count", int(analysis_input.shape[1]))
-            mlflow.log_dict(config, "config_snapshot.yaml")
-            if name == "pca":
-                mlflow.log_param("method", "pca")
-                mlflow.log_param("n_components", 2)
-                reducer = PCA(n_components=2, random_state=config["project"]["random_seed"])
-                coords = reducer.fit_transform(analysis_input_values)
-                mlflow.log_metric(
-                    "explained_variance_sum",
-                    float(np.sum(reducer.explained_variance_ratio_)),
-                )
-            elif name == "tsne":
-                tsne_cfg = analysis_cfg.get("tsne", {})
-                mlflow.log_param("method", "tsne")
-                mlflow.log_param("n_components", 2)
-                mlflow.log_param("perplexity", tsne_cfg.get("perplexity", 30))
-                reducer = TSNE(
-                    n_components=2,
-                    perplexity=tsne_cfg.get("perplexity", 30),
-                    init="pca",
-                    learning_rate="auto",
-                    random_state=config["project"]["random_seed"],
-                )
-                coords = reducer.fit_transform(analysis_input_values)
-            else:
-                try:
-                    import umap  # type: ignore
-                except Exception as exc:
-                    mlflow.log_param("skipped_reason", f"umap_unavailable: {exc}")
-                    continue
-                umap_cfg = analysis_cfg.get("umap", {})
-                mlflow.log_param("method", "umap")
-                mlflow.log_param("n_components", 2)
-                mlflow.log_param("n_neighbors", umap_cfg.get("n_neighbors", 15))
-                mlflow.log_param("min_dist", umap_cfg.get("min_dist", 0.1))
-                reducer = umap.UMAP(
-                    n_components=2,
-                    n_neighbors=umap_cfg.get("n_neighbors", 15),
-                    min_dist=umap_cfg.get("min_dist", 0.1),
-                    random_state=config["project"]["random_seed"],
-                )
-                coords = reducer.fit_transform(analysis_input_values)
-
-            result_df = pd.DataFrame(
-                {
-                    "x": coords[:, 0],
-                    "y": coords[:, 1],
-                    "target": target_series.astype(str).values,
-                }
+        explained_variance_sum = None
+        method_params: Dict[str, Any] = {"method": name, "n_components": 2}
+        if name == "pca":
+            reducer = PCA(n_components=2, random_state=config["project"]["random_seed"])
+            coords = reducer.fit_transform(analysis_input_values)
+            explained_variance_sum = float(np.sum(reducer.explained_variance_ratio_))
+        elif name == "tsne":
+            tsne_cfg = analysis_cfg.get("tsne", {})
+            method_params["perplexity"] = tsne_cfg.get("perplexity", 30)
+            reducer = TSNE(
+                n_components=2,
+                perplexity=tsne_cfg.get("perplexity", 30),
+                init="pca",
+                learning_rate="auto",
+                random_state=config["project"]["random_seed"],
             )
-            result_path = paths.analysis_dir / f"{name}_2d.csv"
-            save_dataframe(result_path, result_df)
-            mlflow.log_artifact(str(result_path), artifact_path="analysis")
-            mlflow.log_metric("point_count", int(len(result_df)))
-            mlflow.log_metric("target_class_count", int(result_df["target"].nunique()))
+            coords = reducer.fit_transform(analysis_input_values)
+        else:
+            try:
+                import umap  # type: ignore
+            except Exception:
+                continue
+            umap_cfg = analysis_cfg.get("umap", {})
+            method_params["n_neighbors"] = umap_cfg.get("n_neighbors", 15)
+            method_params["min_dist"] = umap_cfg.get("min_dist", 0.1)
+            reducer = umap.UMAP(
+                n_components=2,
+                n_neighbors=umap_cfg.get("n_neighbors", 15),
+                min_dist=umap_cfg.get("min_dist", 0.1),
+                random_state=config["project"]["random_seed"],
+            )
+            coords = reducer.fit_transform(analysis_input_values)
 
-            plot_path = paths.plots_dir / f"{name}_scatter.png"
-            save_analysis_scatter_plot(result_df, plot_path, title=f"{name.upper()} 2D Scatter")
-            mlflow.log_artifact(str(plot_path), artifact_path="plots")
+        result_df = pd.DataFrame({"x": coords[:, 0], "y": coords[:, 1], "target": target_series.astype(str).values})
+        result_path = paths.analysis_dir / f"{name}_2d.csv"
+        save_dataframe(result_path, result_df)
+        plot_path = paths.plots_dir / f"{name}_scatter.png"
+        save_analysis_scatter_plot(result_df, plot_path, title=f"{name.upper()} 2D Scatter")
 
-            mark_experiment_completed(state, "analysis", name)
-            save_run_state(paths, state)
+        row = {
+            "name": name,
+            "result_path": str(result_path),
+            "plot_path": str(plot_path),
+            "point_count": int(len(result_df)),
+            "target_class_count": int(result_df["target"].nunique()),
+            **method_params,
+        }
+        if explained_variance_sum is not None:
+            row["explained_variance_sum"] = explained_variance_sum
+        visualization_rows.append(row)
+
+        mark_experiment_completed(state, "analysis", name)
+        save_run_state(paths, state)
+
+    if visualization_rows:
+        index_df = pd.DataFrame(visualization_rows)
+        index_path = paths.analysis_dir / "visualization_index.csv"
+        save_dataframe(index_path, index_df)
+        return {
+            "index_path": index_path,
+            "rows": visualization_rows,
+            "sample_count": int(len(feature_df)),
+            "feature_count": int(feature_df.shape[1]),
+            "analysis_input_feature_count": int(analysis_input.shape[1]),
+        }
+    return {}
