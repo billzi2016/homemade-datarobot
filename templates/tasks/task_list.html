@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+
+{% block title %}任务列表{% endblock %}
+
+{% block content %}
+<div class="panel" style="margin-bottom:16px;">
+  <h2>任务列表</h2>
+  <div class="muted">当前阶段按本地 `storage/user_bizi/task_*` 目录扫描任务。</div>
+</div>
+
+<div class="grid cards">
+  {% for item in task_cards %}
+    <div class="panel">
+      <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;">
+        <div class="text-wrap">
+          <h3 class="text-wrap">{{ item.task_id }}</h3>
+          <div class="muted text-wrap">{{ item.task_type }} / target={{ item.target_column }}</div>
+        </div>
+        <span class="badge {% if item.status == 'completed' or item.status == 'success' %}ok{% elif item.status == 'failed' %}fail{% endif %}">
+          {{ item.status }}
+        </span>
+      </div>
+      <div style="margin-top:16px;" class="kv compact">
+        <div class="muted">当前阶段</div><div class="text-wrap">{{ item.current_stage }}</div>
+        <div class="muted">更新时间</div><div class="text-wrap">{{ item.updated_at }}</div>
+      </div>
+      <div style="margin-top:16px;">
+        <a class="button primary" href="{% url 'task-detail' item.task_id %}">进入详情</a>
+      </div>
+    </div>
+  {% empty %}
+    <div class="panel">
+      <h3>暂无任务</h3>
+      <div class="muted">先去创建一个任务目录，再从 Django 启动训练。</div>
+    </div>
+  {% endfor %}
+</div>
+{% endblock %}

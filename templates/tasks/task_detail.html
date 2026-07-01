@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+
+{% block title %}{{ task.task_id }}{% endblock %}
+
+{% block content %}
+<div class="grid" style="grid-template-columns: 1.2fr 0.8fr;">
+  <div class="panel">
+    <div style="display:flex;justify-content:space-between;gap:16px;align-items:flex-start;">
+      <div>
+        <h2 style="margin-bottom:8px;">{{ task.task_id }}</h2>
+        <div class="muted">{{ status_payload.task_type }} / target={{ status_payload.target_column }}</div>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;">
+        <form method="post" action="{{ run_url }}">
+          {% csrf_token %}
+          <button class="primary" type="submit">启动任务</button>
+        </form>
+        <a class="button" href="{{ status_payload.mlflow_url }}" target="_blank">打开 MLflow</a>
+        <a class="button" href="{{ download_url }}">下载产物</a>
+      </div>
+    </div>
+
+    <div style="margin-top:18px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <strong>任务进度</strong>
+        <span class="muted"><span id="progress-percent-value">{{ status_payload.progress_percent }}</span>% (<span id="progress-label-value">{{ status_payload.progress_label }}</span>)</span>
+      </div>
+      <div style="height:14px;background:#e8edf5;border-radius:999px;overflow:hidden;">
+        <div id="progress-bar-fill" style="height:100%;width: {{ status_payload.progress_percent }}%;background:#1f5eff;transition:width 0.25s ease;"></div>
+      </div>
+    </div>
+
+    <div class="kv" style="margin-top:18px;">
+      <div class="muted">状态</div><div id="status-value">{{ status_payload.status }}</div>
+      <div class="muted">当前阶段</div><div id="stage-value">{{ status_payload.current_stage }}</div>
+      <div class="muted">最近完成实验</div><div id="last-exp-value">{{ status_payload.last_completed_experiment|default:"-" }}</div>
+      <div class="muted">PID</div><div id="pid-value">{{ status_payload.pid|default:"-" }}</div>
+      <div class="muted">进程是否在跑</div><div id="running-value">{{ status_payload.is_process_running }}</div>
+      <div class="muted">可下载文件数</div><div id="download-count-value">{{ status_payload.downloadable_count }}</div>
+      <div class="muted">配置文件</div><div>{{ status_payload.config_path }}</div>
+      <div class="muted">输出目录</div><div>{{ status_payload.outputs_dir }}</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3>完成明细</h3>
+    <div class="completion-block">
+      <strong>analysis</strong>
+      <div class="mini-list" data-completion-domain="analysis">
+        {% for item in status_payload.completed_experiments.analysis %}
+          <span class="mini-chip">{{ item }}</span>
+        {% empty %}
+          <span class="muted">暂无</span>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="completion-block">
+      <strong>sklearn</strong>
+      <div class="mini-list" data-completion-domain="sklearn">
+        {% for item in status_payload.completed_experiments.sklearn %}
+          <span class="mini-chip">{{ item }}</span>
+        {% empty %}
+          <span class="muted">暂无</span>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="completion-block">
+      <strong>torch</strong>
+      <div class="mini-list" data-completion-domain="torch">
+        {% for item in status_payload.completed_experiments.torch %}
+          <span class="mini-chip">{{ item }}</span>
+        {% empty %}
+          <span class="muted">暂无</span>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="panel" style="margin-top:16px;">
+  <h3>最近日志</h3>
+  <pre class="log" id="log-tail">{% for line in status_payload.log_tail %}{{ line }}
+{% empty %}暂无日志{% endfor %}</pre>
+</div>
+
+<script>
+  function renderCompletionList(domain, values) {
+    const container = document.querySelector(`[data-completion-domain="${domain}"]`);
+    if (!container) {
+      return;
+    }
+    const items = values || [];
+    if (!items.length) {
+      container.innerHTML = '<span class="muted">暂无</span>';
+      return;
+    }
+    container.innerHTML = items
+      .map((value) => `<span class="mini-chip">${String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}</span>`)
+      .join("");
+  }
+
+  const eventSource = new EventSource("{{ events_url }}");
+  eventSource.onmessage = function(event) {
+    const payload = JSON.parse(event.data);
+    document.getElementById("status-value").textContent = payload.status || "-";
+    document.getElementById("stage-value").textContent = payload.current_stage || "-";
+    document.getElementById("last-exp-value").textContent = payload.last_completed_experiment || "-";
+    document.getElementById("pid-value").textContent = payload.pid || "-";
+    document.getElementById("running-value").textContent = String(payload.is_process_running);
+    document.getElementById("download-count-value").textContent = String(payload.downloadable_count);
+    document.getElementById("progress-percent-value").textContent = String(payload.progress_percent ?? 0);
+    document.getElementById("progress-label-value").textContent = payload.progress_label || "0 / 0";
+    document.getElementById("progress-bar-fill").style.width = `${payload.progress_percent || 0}%`;
+    renderCompletionList("analysis", payload.completed_experiments?.analysis);
+    renderCompletionList("sklearn", payload.completed_experiments?.sklearn);
+    renderCompletionList("torch", payload.completed_experiments?.torch);
+    document.getElementById("log-tail").textContent = (payload.log_tail || []).join("\n") || "暂无日志";
+    if (!payload.is_process_running && ["completed", "failed", "cancelled", "success"].includes(payload.status)) {
+      eventSource.close();
+    }
+  };
+</script>
+{% endblock %}

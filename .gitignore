@@ -9,6 +9,12 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
+# 本地环境变量
+.env
+
+# Django 本地数据库
+db.sqlite3
+
 # 测试数据
 test/test_data/
 

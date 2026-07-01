@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+
+{% block title %}{{ task_id }} 下载列表{% endblock %}
+
+{% block content %}
+<div class="panel">
+  <h2>{{ task_id }} 下载列表</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>文件名</th>
+        <th>相对路径</th>
+        <th>大小（bytes）</th>
+        <th>MIME</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in records %}
+        <tr>
+          <td>{{ item.name }}</td>
+          <td>{{ item.relative_path }}</td>
+          <td>{{ item.size_bytes }}</td>
+          <td>{{ item.mime_type }}</td>
+          <td><a href="{% url 'task-file-download' task_id %}?path={{ item.relative_path|urlencode }}">下载</a></td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="5">暂无可下载文件。</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

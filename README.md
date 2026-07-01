@@ -4,6 +4,15 @@
 
 当前阶段已经落下来的核心能力：
 
+- `Django`
+  - 任务列表
+  - 任务创建
+  - 数据上传
+  - 本地子进程启动训练
+  - SSE 状态刷新
+  - 任务级进度条
+  - 结果下载入口
+  - MLflow 跳转入口
 - `analysis`
   - `PCA`
   - `t-SNE`
@@ -49,6 +58,20 @@
 homemade-datarobot/
 ├── README.md
 ├── PRD_Django业务系统.md
+├── manage.py
+├── homemade_datarobot_web/
+│   ├── settings.py
+│   ├── urls.py
+│   ├── asgi.py
+│   └── wsgi.py
+├── tasks/
+│   ├── forms.py
+│   ├── services.py
+│   ├── urls.py
+│   └── views.py
+├── templates/
+│   ├── base.html
+│   └── tasks/
 ├── mlflow-app/
 │   ├── PRD_可控AutoML方案.md
 │   ├── run_task.py
@@ -67,6 +90,14 @@ homemade-datarobot/
 
 其中：
 
+- `manage.py`
+  - Django 本地开发入口
+- `homemade_datarobot_web/`
+  - Django 工程配置与顶层路由
+- `tasks/`
+  - Django 任务管理应用
+- `templates/`
+  - Django 页面模板
 - `mlflow-app/run_task.py`
   - 单个 task 的总入口
 - `mlflow-app/task_runtime.py`
@@ -160,6 +191,128 @@ storage/user_bizi/mlruns/
 
 ```bash
 cd /Users/bizi/Desktop/GitHub/homemade-datarobot
+```
+
+### 本地环境变量
+
+复制示例环境文件：
+
+```bash
+cp .env.example .env
+```
+
+`.env` 已加入 `.gitignore`，不会进入版本库。当前支持：
+
+```text
+DJANGO_SECRET_KEY
+DJANGO_DEBUG
+DJANGO_ALLOWED_HOSTS
+DJANGO_RUNSERVER_HOST
+DJANGO_RUNSERVER_PORT
+TASK_STORAGE_ROOT
+MLFLOW_UI_BASE_URL
+DJANGO_ADMIN_USERNAME
+DJANGO_ADMIN_EMAIL
+DJANGO_ADMIN_PASSWORD
+```
+
+### 启动 Django 业务页面
+
+当前 Django 只是本地业务壳层，不使用 Celery / RabbitMQ。任务启动方式是：
+
+```text
+Django -> subprocess -> mlflow-app/run_task.py -> MLflow
+```
+
+启动 Django：
+
+```bash
+python3 manage.py runserver 127.0.0.1:18743
+```
+
+页面地址：
+
+```text
+http://127.0.0.1:18743/
+```
+
+Django admin：
+
+```text
+http://127.0.0.1:18743/admin/
+```
+
+本地创建 admin 用户：
+
+```bash
+./scripts/create_admin.sh
+```
+
+账号信息来自 `.env`：
+
+```text
+DJANGO_ADMIN_USERNAME
+DJANGO_ADMIN_EMAIL
+DJANGO_ADMIN_PASSWORD
+```
+
+当前 Django 页面支持：
+
+- 查看 `storage/user_bizi/task_*` 任务列表
+- 创建新任务并上传数据
+- 在任务详情页启动训练子进程
+- 通过 SSE 刷新状态和任务级进度条
+- 查看最近训练日志
+- 下载 task 目录下的配置、状态、预测、指标、图表和模型文件
+- 跳转到 MLflow UI
+
+### OpenAPI / Swagger 页面
+
+当前 API 使用 `django-ninja`，因此 OpenAPI 与 Swagger UI 是框架自动生成的真实页面。
+
+固定入口：
+
+```text
+Swagger UI: http://127.0.0.1:18743/api/docs
+OpenAPI JSON: http://127.0.0.1:18743/api/openapi.json
+API 示例: http://127.0.0.1:18743/api/tasks
+```
+
+Swagger UI：
+
+```text
+http://127.0.0.1:18743/api/docs
+```
+
+OpenAPI JSON：
+
+```text
+http://127.0.0.1:18743/api/openapi.json
+```
+
+首版 API 包括：
+
+- `GET /api/tasks`
+- `GET /api/tasks/{task_id}`
+- `POST /api/tasks/{task_id}/run`
+- `GET /api/tasks/{task_id}/downloads`
+
+安全说明：
+
+- Django 页面表单启用 CSRF token
+- `django-ninja` 的写接口已加 `@csrf_protect`
+- 响应头包含 `Content-Security-Policy`、`X-Content-Type-Options`、`Referrer-Policy`、`Permissions-Policy`
+- Django 模板默认 autoescape；前端动态渲染完成明细时也会转义文本
+
+说明：
+
+- `db.sqlite3` 是 Django 本地开发数据库，已加入 `.gitignore`
+- 当前还没有做用户鉴权，默认使用 `storage/user_bizi`
+- 当前没有引入 Celery，后续任务量变大再考虑队列化
+- 如果需要使用 Django admin / session 等内置表，再执行：
+
+```bash
+python3 manage.py migrate
 ```
 
 ### 运行 task_iris

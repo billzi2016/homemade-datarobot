@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+
+{% block title %}创建任务{% endblock %}
+
+{% block content %}
+<div class="panel">
+  <h2>创建任务</h2>
+  <form method="post" enctype="multipart/form-data">
+    {% csrf_token %}
+    {% if form.non_field_errors %}
+      <div class="message">{{ form.non_field_errors }}</div>
+    {% endif %}
+    <div class="form-grid">
+      {% for field in form %}
+        <div class="{% if field.name == 'numeric_columns' or field.name == 'categorical_columns' or field.name == 'onehot_columns' %}full{% endif %}">
+          {% if field.field.widget.input_type == "checkbox" %}
+            <div class="checkbox-field">
+              <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+              {{ field }}
+            </div>
+          {% else %}
+            <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+            {{ field }}
+            {% if field.help_text %}
+              <div class="muted" style="margin-top:6px;">{{ field.help_text }}</div>
+            {% endif %}
+          {% endif %}
+          {% if field.errors %}
+            <div style="margin-top:6px;color:#bf1d2d;">{{ field.errors }}</div>
+          {% endif %}
+        </div>
+      {% endfor %}
+    </div>
+    <div style="margin-top:18px;">
+      <button class="primary" type="submit">创建任务</button>
+    </div>
+  </form>
+</div>
+{% endblock %}
